@@ -1,0 +1,227 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
+
+:root {
+    --primary-gradient: linear-gradient(to right, #0f4c81 0%, #3a7bd5 100%);
+    --surface: rgba(255, 255, 255, 0.08);
+    --surface-border: rgba(255, 255, 255, 0.22);
+    --surface-shadow: 0 18px 40px rgba(10, 24, 41, 0.28);
+    --text-main: #1f2a37;
+    --text-muted: #5f6f84;
+    --danger-bg: rgba(220, 38, 38, 0.1);
+    --danger-border: rgba(220, 38, 38, 0.28);
+    --danger-text: #991b1b;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: 'Poppins', sans-serif;
+    overflow: hidden;
+}
+
+.auth-stage {
+    width: min(920px, calc(100% - 32px));
+    z-index: 2;
+}
+
+.auth-container {
+    position: relative;
+    overflow: hidden;
+    border-radius: 20px;
+    background: var(--surface);
+    border: 1px solid var(--surface-border);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    box-shadow: var(--surface-shadow);
+    min-height: 540px;
+    display: flex;
+}
+
+.auth-form-container,
+.auth-overlay-container {
+    width: 50%;
+}
+
+.auth-form {
+    background: var(--primary-gradient);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 48px;
+}
+
+.auth-form h1 {
+    margin: 0;
+    font-size: 34px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.auth-form span {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 12px;
+    margin: 10px 0 18px;
+}
+
+.auth-form input {
+    width: 100%;
+    max-width: 320px;
+    background-color: transparent;
+    border: 0;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.45);
+    color: #ffffff;
+    padding: 12px 6px;
+    margin: 8px 0;
+    font-size: 14px;
+    font-family: 'Poppins', sans-serif;
+    transition: border-color 0.2s ease;
+}
+
+.auth-form input:focus {
+    outline: none;
+    border-bottom-color: #ffffff;
+}
+
+.auth-form input::placeholder {
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.auth-form button {
+    margin-top: 16px;
+    border: none;
+    border-radius: 40px;
+    background: #ffffff;
+    color: #1f4fa3;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 12px 44px;
+    cursor: pointer;
+    box-shadow: 0 8px 18px rgba(37, 117, 252, 0.25);
+    transition: transform 0.12s ease, box-shadow 0.2s ease;
+}
+
+.auth-form button:hover {
+    box-shadow: 0 12px 22px rgba(14, 57, 121, 0.32);
+}
+
+.auth-form button:active {
+    transform: scale(0.97);
+}
+
+.auth-error {
+    width: 100%;
+    max-width: 320px;
+    margin-bottom: 10px;
+    padding: 9px 11px;
+    border-radius: 8px;
+    border: 1px solid rgba(254, 202, 202, 0.5);
+    background: rgba(127, 29, 29, 0.28);
+    color: #fee2e2;
+    font-size: 12px;
+    text-align: left;
+}
+
+.auth-demo {
+    margin-top: 14px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.auth-demo p {
+    margin: 0;
+}
+
+.auth-overlay-container {
+    overflow: hidden;
+}
+
+.auth-overlay {
+    width: 100%;
+    height: 100%;
+    background: #ffffff;
+    color: var(--text-main);
+}
+
+.auth-overlay-panel {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 0 42px;
+}
+
+.auth-logo {
+    width: min(180px, 55%);
+    height: auto;
+    margin-bottom: 16px;
+    filter: drop-shadow(0 8px 18px rgba(0, 0, 0, 0.22));
+}
+
+.auth-overlay-panel h2 {
+    margin: 0;
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.auth-overlay-panel p {
+    margin: 20px 0 0;
+    font-size: 14px;
+    font-weight: 300;
+    line-height: 1.5;
+    letter-spacing: 0.3px;
+    max-width: 34ch;
+    color: var(--text-muted);
+}
+
+#canvas1 {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100vh;
+    z-index: 1;
+    background: linear-gradient(to right, #ece9e6, #ffffff);
+}
+
+@media (max-width: 860px) {
+    .auth-container {
+        min-height: 620px;
+        flex-direction: column-reverse;
+    }
+
+    .auth-form-container,
+    .auth-overlay-container {
+        width: 100%;
+    }
+
+    .auth-overlay-container {
+        min-height: 220px;
+    }
+
+    .auth-logo {
+        width: min(140px, 40%);
+        margin-bottom: 12px;
+    }
+
+    .auth-form {
+        padding: 36px 24px 44px;
+    }
+
+    .auth-form h1 {
+        font-size: 30px;
+    }
+}

@@ -1,0 +1,23 @@
+academic-scheduling/
+├── index.php
+├── config/
+│   └── database.php
+├── includes/
+│   ├── header.php
+│   ├── footer.php
+│   └── auth.php
+├── admin/
+│   ├── dashboard.php
+│   ├── generate_schedule.php
+│   ├── report.php
+│   └── view_schedules.php
+├── instructor/
+│   └── dashboard.php
+├── python_ga/
+│   ├── genetic_algorithm.py
+│   └── requirements.txt
+├── css/
+│   └── style.css
+└── sql/
+    └── database.sql
+    
