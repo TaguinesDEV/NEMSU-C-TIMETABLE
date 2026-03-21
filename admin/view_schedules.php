@@ -6,11 +6,24 @@ $pdo = getDB();
 $job_id = $_GET['job_id'] ?? 0;
 $message = '';
 $error = '';
+$conflict_ids = [];
+
+// Load conflict info from session and then clear it
+if (isset($_SESSION['publish_error'])) {
+    $error = $_SESSION['publish_error'];
+    unset($_SESSION['publish_error']);
+}
+if (isset($_SESSION['publish_conflict_ids'])) {
+    // Flip for faster lookups: [id1, id2] -> [id1 => true, id2 => true]
+    $conflict_ids = array_flip($_SESSION['publish_conflict_ids']);
+    unset($_SESSION['publish_conflict_ids']);
+}
 
 if (isset($_GET['message'])) {
     $message = $_GET['message'];
 }
-if (isset($_GET['error'])) {
+// Do not overwrite the session error if a GET error is also present
+if (isset($_GET['error']) && empty($error)) {
     $error = $_GET['error'];
 }
 
@@ -62,11 +75,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $parts[] = "Instructor conflict on {$c['day']} {$time_text} ({$c['new_instructor']})";
                 }
             }
-            $error = "Cannot publish schedule due to conflicts with already published schedules: " . implode('; ', $parts) . ".";
+            // Store error and conflict IDs in session, then redirect
+            $_SESSION['publish_error'] = "Cannot publish schedule due to conflicts with already published schedules: " . implode('; ', $parts) . ".";
+            $_SESSION['publish_conflict_ids'] = array_column($publish_conflicts, 'new_schedule_id');
+            
+            header("Location: view_schedules.php?job_id=$job_id");
+            exit();
+
         } else {
             $stmt = $pdo->prepare("UPDATE schedules SET is_published = 1 WHERE job_id = ?");
             $stmt->execute([$job_id]);
-            $message = "Schedule has been approved and published successfully!";
+
+            // Redirect with success message
+            header("Location: view_schedules.php?job_id=$job_id&message=" . urlencode("Schedule has been approved and published successfully!"));
+            exit();
         }
     }
     
@@ -104,7 +126,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exec($command . ' > /dev/null 2>&1 &');
         }
         
-        $message = "New schedule generation job has been started based on this schedule.";
+        header("Location: view_schedules.php?job_id=$job_id&message=" . urlencode("New schedule generation job has been started based on this schedule."));
+        exit();
     }
 }
 
@@ -121,6 +144,20 @@ $job = $stmt->fetch();
 if (!$job) {
     header('Location: dashboard.php');
     exit();
+}
+
+function formatDurationCompact($seconds) {
+    $seconds = max(0, (int)$seconds);
+    $hours = intdiv($seconds, 3600);
+    $minutes = intdiv($seconds % 3600, 60);
+    $secs = $seconds % 60;
+    if ($hours > 0) {
+        return $hours . 'h ' . $minutes . 'm';
+    }
+    if ($minutes > 0) {
+        return $minutes . 'm ' . $secs . 's';
+    }
+    return $secs . 's';
 }
 
 // Get schedule entries with all details
@@ -260,6 +297,12 @@ foreach ($schedules as $schedule) {
         .published-row {
             background-color: #d4edda;
         }
+
+        .conflict-row {
+            background-color: #f8d7da !important;
+            font-weight: bold;
+            border: 1px solid #dc3545;
+        }
         
         .published-badge {
             background: #28a745;
@@ -396,6 +439,121 @@ foreach ($schedules as $schedule) {
                 border: 1px solid black;
             }
         }
+        /* Edit Modal Styles */
+        .edit-modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.5);
+            animation: modalFadeIn 0.3s ease-out;
+        }
+        
+        .modal-content {
+            background-color: white;
+            margin: 5% auto;
+            padding: 0;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 85vh;
+            overflow: hidden;
+            transform: scale(0.8) translateY(-50px);
+            animation: modalSlideIn 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.25);
+        }
+        
+        .modal-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-header h3 {
+            margin: 0;
+            font-size: 22px;
+        }
+        
+        .close-modal {
+            color: white;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: background 0.2s;
+        }
+        
+        .close-modal:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .modal-body {
+            padding: 25px;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+        
+        .modal-footer {
+            padding: 20px 25px;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+        
+        .spinner {
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes modalFadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        @keyframes modalSlideIn {
+            to {
+                transform: scale(1) translateY(0);
+            }
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        @media (max-width: 768px) {
+            .modal-content {
+                width: 95%;
+                margin: 10% auto;
+            }
+        }
     </style>
 </head>
 <body>
@@ -418,7 +576,45 @@ foreach ($schedules as $schedule) {
         <?php endif; ?>
         
         <?php if ($error): ?>
-            <div class="error"><?php echo $error; ?></div>
+            <div class="error-overlay" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); z-index: 9999; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; padding: 20px; text-align: center;">
+                <div style="max-width: 90%; max-height: 90%; overflow: auto; background: rgba(255,255,255,0.1); border-radius: 12px; padding: 40px; backdrop-filter: blur(10px);">
+                    <h2 style="color: #fee2e2; margin-bottom: 20px;">⚠️ Publish Conflict Detected</h2>
+                    <p style="line-height: 1.6; margin-bottom: 20px;"><?php echo htmlspecialchars($error); ?></p>
+                    <button onclick="this.parentElement.parentElement.style.display='none'" style="background: #ef4444; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer;">Close</button>
+                </div>
+            </div>
+            <script>
+                // Auto-focus close button and restore scroll/conflict highlights
+                document.addEventListener('DOMContentLoaded', function() {
+                    const overlay = document.querySelector('.error-overlay');
+                    if (overlay) {
+                        overlay.querySelector('button').focus();
+                        document.body.style.overflow = 'hidden';
+                        overlay.addEventListener('click', function(e) {
+                            if (e.target === this || e.target.matches('button')) {
+                                this.style.display = 'none';
+                                document.body.style.overflow = '';
+                                // Scroll to top and highlight conflicts
+                                window.scrollTo(0, 0);
+                                setTimeout(() => {
+                                    const conflictRows = document.querySelectorAll('.conflict-row');
+                                    if (conflictRows.length > 0) {
+                                        conflictRows[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                    }
+                                }, 200);
+                            }
+                        });
+                        // Close on ESC key
+                        document.addEventListener('keydown', function(e) {
+                            if (e.key === 'Escape') {
+                                overlay.style.display = 'none';
+                                document.body.style.overflow = '';
+                                window.scrollTo(0, 0);
+                            }
+                        });
+                    }
+                });
+            </script>
         <?php endif; ?>
         
         <!-- Job Information -->
@@ -513,7 +709,7 @@ foreach ($schedules as $schedule) {
                                     
                                     foreach ($grouped_schedules[$day] as $schedule): 
                                     ?>
-                                    <tr class="<?php echo $schedule['is_published'] ? 'published-row' : ''; ?>">
+                                    <tr class="<?php echo $schedule['is_published'] ? 'published-row' : ''; ?> <?php echo isset($conflict_ids[$schedule['id']]) ? 'conflict-row' : ''; ?>">
                                         <td>
                                             <?php echo date('g:i A', strtotime($schedule['start_time'])); ?> - 
                                             <?php echo date('g:i A', strtotime($schedule['end_time'])); ?>
@@ -529,8 +725,7 @@ foreach ($schedules as $schedule) {
                                         </td>
                                         <td><?php echo $schedule['department']; ?></td>
                                         <td>
-                                            <a href="edit_schedule_entry.php?id=<?php echo $schedule['id']; ?>" 
-                                               class="btn-icon btn-edit"><i class="fas fa-edit"></i> Edit</a>
+<a href="#" onclick="loadEditModal(<?php echo $schedule['id']; ?>, '<?php echo $job_id; ?>')" class="btn-icon btn-edit"><i class="fas fa-edit"></i> Edit</a>
                                             <?php if (!$schedule['is_published']): ?>
                                             <a href="publish_entry.php?id=<?php echo $schedule['id']; ?>&job_id=<?php echo $job_id; ?>" 
                                                class="btn-icon btn-publish"><i class="fas fa-check"></i> Publish</a>
@@ -578,11 +773,42 @@ foreach ($schedules as $schedule) {
                 </div>
             </div>
         <?php elseif ($job['status'] == 'processing'): ?>
+            <?php $progress_percent = max(1, min(99, (int)($job['progress_percent'] ?? 50))); ?>
+            <?php
+                $current_generation = max(0, (int)($job['current_generation'] ?? 0));
+                $total_generations = max(0, (int)($job['total_generations'] ?? 0));
+                $best_fitness = max(0, min(100, (int)($job['best_fitness'] ?? 0)));
+            ?>
+            <?php
+                $created_ts = strtotime((string)($job['created_at'] ?? ''));
+                $now_ts = time();
+                $elapsed_seconds = ($created_ts && $created_ts > 0) ? max(0, $now_ts - $created_ts) : 0;
+                $eta_seconds = null;
+                $eta_finish_ts = null;
+                if ($progress_percent >= 5 && $elapsed_seconds > 0) {
+                    $estimated_total_seconds = (int)round(($elapsed_seconds * 100) / $progress_percent);
+                    $eta_seconds = max(0, $estimated_total_seconds - $elapsed_seconds);
+                    $eta_finish_ts = $now_ts + $eta_seconds;
+                }
+            ?>
             <div class="processing-message">
                 <h2>Schedule is still being generated...</h2>
                 <p>The genetic algorithm is running. This may take a few minutes.</p>
+                <p><strong>Progress: <?php echo $progress_percent; ?>%</strong></p>
+                <p><strong>Generation:</strong> <?php echo $current_generation; ?><?php echo $total_generations > 0 ? ' / ' . $total_generations : ''; ?></p>
+                <p><strong>Best fitness so far:</strong> <?php echo $best_fitness; ?>%</p>
+                <?php if ($current_generation === 0): ?>
+                    <p><strong>Phase:</strong> Initializing population (preparing candidates before Generation 1)</p>
+                <?php endif; ?>
+                <p><strong>Elapsed:</strong> <?php echo htmlspecialchars(formatDurationCompact($elapsed_seconds)); ?></p>
+                <?php if ($eta_seconds !== null): ?>
+                    <p><strong>Estimated time remaining:</strong> <?php echo htmlspecialchars(formatDurationCompact($eta_seconds)); ?></p>
+                    <p><strong>Estimated completion:</strong> <?php echo date('g:i A', $eta_finish_ts); ?></p>
+                <?php else: ?>
+                    <p><strong>Estimated time remaining:</strong> Calculating...</p>
+                <?php endif; ?>
                 <div class="progress-bar">
-                    <div class="progress" style="width: 50%;"></div>
+                    <div class="progress" style="width: <?php echo $progress_percent; ?>%; animation: none;"></div>
                 </div>
                 <p>Please wait or <a href="view_schedules.php?job_id=<?php echo $job_id; ?>">refresh</a> the page.</p>
             </div>
@@ -602,7 +828,7 @@ foreach ($schedules as $schedule) {
         <?php elseif ($job['status'] == 'failed'): ?>
             <div class="error">
                 <h2>Schedule Generation Failed</h2>
-                <p>There was an error generating the schedule. Please try again.</p>
+                <p><?php echo htmlspecialchars(trim((string)($job['error_message'] ?? '')) !== '' ? (string)$job['error_message'] : 'There was an error generating the schedule. Please try again.'); ?></p>
                 <a href="generate_schedule.php" class="btn-primary">Create New Schedule</a>
             </div>
         <?php endif; ?>
@@ -624,8 +850,32 @@ foreach ($schedules as $schedule) {
                     <h4>Constraints:</h4>
                     <ul>
                         <?php foreach ($input_data['constraints'] as $key => $value): ?>
-                            <li><strong><?php echo str_replace('_', ' ', $key); ?>:</strong> 
-                                <?php echo is_bool($value) ? ($value ? 'Yes' : 'No') : $value; ?>
+                            <li><strong><?php echo htmlspecialchars(str_replace('_', ' ', $key)); ?>:</strong>
+                                <?php
+                                if (is_bool($value)) {
+                                    echo $value ? 'Yes' : 'No';
+                                } elseif (is_array($value)) {
+                                    if ($key === 'mirror_pairs') {
+                                        if (empty($value)) {
+                                            echo 'None';
+                                        } else {
+                                            $pairs = [];
+                                            foreach ($value as $pair) {
+                                                $day = trim((string)($pair['day'] ?? ''));
+                                                $mirror = trim((string)($pair['mirror'] ?? ''));
+                                                if ($day !== '' && $mirror !== '') {
+                                                    $pairs[] = $day . ' -> ' . $mirror;
+                                                }
+                                            }
+                                            echo htmlspecialchars(!empty($pairs) ? implode(', ', $pairs) : 'None');
+                                        }
+                                    } else {
+                                        echo htmlspecialchars(json_encode($value, JSON_UNESCAPED_SLASHES));
+                                    }
+                                } else {
+                                    echo htmlspecialchars((string)$value);
+                                }
+                                ?>
                             </li>
                         <?php endforeach; ?>
                     </ul>
@@ -693,6 +943,12 @@ foreach ($schedules as $schedule) {
         
         .published-row {
             background-color: #d4edda;
+        }
+
+        .conflict-row {
+            background-color: #f8d7da !important;
+            font-weight: bold;
+            border: 1px solid #dc3545;
         }
         
         .published-badge {
@@ -808,5 +1064,124 @@ foreach ($schedules as $schedule) {
             }
         }
     </style>
+    <?php if ($job['status'] === 'processing'): ?>
+    <script>
+        setTimeout(function () {
+            window.location.reload();
+        }, 5000);
+    </script>
+    <?php endif; ?>
+
+    <script>
+    // Modal functionality
+    function loadEditModal(id, job_id) {
+        const modal = document.getElementById('editModal');
+        const body = document.querySelector('#editModal .modal-body');
+        
+        // Show modal with loading
+        modal.style.display = 'block';
+        body.innerHTML = '<div class="loading"><div class="spinner"></div>Loading edit form...</div>';
+        
+        // Fetch form via AJAX
+        fetch(`edit_schedule_entry.php?id=${id}&job_id=${job_id}`, {
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(response => response.text())
+        .then(html => {
+            body.innerHTML = html;
+            // Re-init JS for room availability
+            if (typeof initRoomAvailability === 'function') {
+                initRoomAvailability();
+            }
+        })
+        .catch(error => {
+            body.innerHTML = '<div class="error">Error loading form. Please refresh and try again.</div>';
+            console.error('Error:', error);
+        });
+    }
+    
+    function closeModal() {
+        document.getElementById('editModal').style.display = 'none';
+    }
+    
+    // Handle form submit via AJAX
+    document.addEventListener('DOMContentLoaded', function() {
+        document.addEventListener('submit', function(e) {
+            if (e.target.matches('.edit-form')) {
+                e.preventDefault();
+                
+                const form = e.target;
+                const modalBody = form.closest('.modal-body');
+                const submitBtn = form.querySelector('button[type="submit"]');
+                
+                // Show loading on button
+                const originalText = submitBtn.innerHTML;
+                submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+                submitBtn.disabled = true;
+                
+                fetch(form.action || window.location.href, {
+                    method: 'POST',
+                    body: new FormData(form),
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Close modal and reload page to refresh highlights/table
+                        setTimeout(() => {
+                            closeModal();
+                            window.location.reload();
+                        }, 1200);
+                        
+                        // Show success in modal briefly
+                        modalBody.innerHTML = '<div class="success" style="padding: 40px; text-align: center;">' + 
+                            '<i class="fas fa-check-circle" style="font-size: 48px; color: #10b981;"></i><br>' +
+                            data.message + '<br><br><small>Refreshing schedule...</small></div>';
+                    } else {
+                        modalBody.innerHTML = '<div class="error" style="padding: 20px;">' + data.error + '</div>';
+                    }
+                })
+                .catch(error => {
+                    modalBody.innerHTML = '<div class="error" style="padding: 20px;">Save failed. Please try again.</div>';
+                    console.error('Error:', error);
+                })
+                .finally(() => {
+                    submitBtn.innerHTML = originalText;
+                    submitBtn.disabled = false;
+                });
+            }
+        });
+        
+        // Close modal on outside click
+        window.onclick = function(event) {
+            const modal = document.getElementById('editModal');
+            if (event.target == modal) {
+                closeModal();
+            }
+        }
+        
+        const errorDiv = document.querySelector('.error');
+        if (errorDiv && errorDiv.textContent.trim() !== '') {
+            alert(errorDiv.textContent.trim());
+        }
+    });
+    </script>
+
+    <!-- Edit Modal -->
+    <div id="editModal" class="edit-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Edit Schedule Entry</h3>
+                <button class="close-modal" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <!-- Form loaded here via AJAX -->
+            </div>
+        </div>
+    </div>
 </body>
 </html>

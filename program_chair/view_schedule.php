@@ -69,6 +69,20 @@ if (!$job) {
     exit();
 }
 
+function formatDurationCompact($seconds) {
+    $seconds = max(0, (int)$seconds);
+    $hours = intdiv($seconds, 3600);
+    $minutes = intdiv($seconds % 3600, 60);
+    $secs = $seconds % 60;
+    if ($hours > 0) {
+        return $hours . 'h ' . $minutes . 'm';
+    }
+    if ($minutes > 0) {
+        return $minutes . 'm ' . $secs . 's';
+    }
+    return $secs . 's';
+}
+
 // Get schedule entries
 $stmt = $pdo->prepare("
     SELECT 
@@ -336,8 +350,42 @@ if (isset($grouped['Saturday'])) {
                 </div>
             </div>
         <?php elseif ($job['status'] == 'processing'): ?>
+            <?php $progress_percent = max(1, min(99, (int)($job['progress_percent'] ?? 50))); ?>
+            <?php
+                $current_generation = max(0, (int)($job['current_generation'] ?? 0));
+                $total_generations = max(0, (int)($job['total_generations'] ?? 0));
+                $best_fitness = max(0, min(100, (int)($job['best_fitness'] ?? 0)));
+            ?>
+            <?php
+                $created_ts = strtotime((string)($job['created_at'] ?? ''));
+                $now_ts = time();
+                $elapsed_seconds = ($created_ts && $created_ts > 0) ? max(0, $now_ts - $created_ts) : 0;
+                $eta_seconds = null;
+                $eta_finish_ts = null;
+                if ($progress_percent >= 5 && $elapsed_seconds > 0) {
+                    $estimated_total_seconds = (int)round(($elapsed_seconds * 100) / $progress_percent);
+                    $eta_seconds = max(0, $estimated_total_seconds - $elapsed_seconds);
+                    $eta_finish_ts = $now_ts + $eta_seconds;
+                }
+            ?>
             <div class="processing-message">
                 <h2>Schedule is being generated...</h2>
+                <p><strong>Progress: <?php echo $progress_percent; ?>%</strong></p>
+                <p><strong>Generation:</strong> <?php echo $current_generation; ?><?php echo $total_generations > 0 ? ' / ' . $total_generations : ''; ?></p>
+                <p><strong>Best fitness so far:</strong> <?php echo $best_fitness; ?>%</p>
+                <?php if ($current_generation === 0): ?>
+                    <p><strong>Phase:</strong> Initializing population (preparing candidates before Generation 1)</p>
+                <?php endif; ?>
+                <p><strong>Elapsed:</strong> <?php echo htmlspecialchars(formatDurationCompact($elapsed_seconds)); ?></p>
+                <?php if ($eta_seconds !== null): ?>
+                    <p><strong>Estimated time remaining:</strong> <?php echo htmlspecialchars(formatDurationCompact($eta_seconds)); ?></p>
+                    <p><strong>Estimated completion:</strong> <?php echo date('g:i A', $eta_finish_ts); ?></p>
+                <?php else: ?>
+                    <p><strong>Estimated time remaining:</strong> Calculating...</p>
+                <?php endif; ?>
+                <div class="progress-bar" style="width:100%;height:20px;background:#e9ecef;border-radius:10px;overflow:hidden;margin:12px 0;">
+                    <div class="progress" style="height:100%;background:#667eea;width:<?php echo $progress_percent; ?>%;"></div>
+                </div>
                 <p>Please wait or <a href="view_schedule.php?job_id=<?php echo $job_id; ?>">refresh</a> the page.</p>
             </div>
         <?php elseif ($job['status'] == 'pending'): ?>
@@ -349,10 +397,17 @@ if (isset($grouped['Saturday'])) {
         <?php elseif ($job['status'] == 'failed'): ?>
             <div class="error">
                 <h2>Schedule Generation Failed</h2>
-                <p>There was an error. Please try again.</p>
+                <p><?php echo htmlspecialchars(trim((string)($job['error_message'] ?? '')) !== '' ? (string)$job['error_message'] : 'There was an error. Please try again.'); ?></p>
                 <a href="generate_schedule.php" class="btn-primary">Create New Schedule</a>
             </div>
         <?php endif; ?>
     </div>
+    <?php if ($job['status'] === 'processing'): ?>
+    <script>
+        setTimeout(function () {
+            window.location.reload();
+        }, 5000);
+    </script>
+    <?php endif; ?>
 </body>
 </html>

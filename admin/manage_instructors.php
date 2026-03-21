@@ -5,6 +5,145 @@ requireAdmin();
 $pdo = getDB();
 $message = '';
 $error = '';
+$non_blocking_warnings = [];
+
+$instructor_columns = [];
+foreach ($pdo->query("SHOW COLUMNS FROM instructors")->fetchAll(PDO::FETCH_ASSOC) as $column) {
+    $instructor_columns[$column['Field']] = true;
+}
+
+function handleInstructorPhotoUpload(array $availableColumns, $fieldName = 'photo', $existingPath = null) {
+    if (empty($_FILES[$fieldName]) || !is_array($_FILES[$fieldName]) || (int)($_FILES[$fieldName]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return [$existingPath, null];
+    }
+
+    if (!isset($availableColumns['photo'])) {
+        return [$existingPath, 'Profile photo upload was skipped because the `photo` column is not available in the database yet.'];
+    }
+
+    $upload = $_FILES[$fieldName];
+    if ((int)($upload['error'] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('Profile photo upload failed. Please try again.');
+    }
+
+    if ((int)($upload['size'] ?? 0) > 2 * 1024 * 1024) {
+        throw new RuntimeException('Profile photo must be 2MB or smaller.');
+    }
+
+    $extension = strtolower(pathinfo((string)($upload['name'] ?? ''), PATHINFO_EXTENSION));
+    $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+    if (!in_array($extension, $allowed_extensions, true)) {
+        throw new RuntimeException('Profile photo must be a JPG, PNG, GIF, or WEBP image.');
+    }
+
+    $targetDirectory = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'assets' . DIRECTORY_SEPARATOR . 'instructor_photos';
+    if (!is_dir($targetDirectory) && !mkdir($targetDirectory, 0775, true) && !is_dir($targetDirectory)) {
+        throw new RuntimeException('Unable to create the instructor photo directory.');
+    }
+
+    $fileName = 'instructor_' . bin2hex(random_bytes(8)) . '.' . $extension;
+    $targetPath = $targetDirectory . DIRECTORY_SEPARATOR . $fileName;
+    if (!move_uploaded_file($upload['tmp_name'], $targetPath)) {
+        throw new RuntimeException('Unable to save the uploaded profile photo.');
+    }
+
+    if (!empty($existingPath) && strpos((string)$existingPath, '../assets/instructor_photos/') === 0) {
+        $existingAbsolutePath = dirname(__DIR__) . DIRECTORY_SEPARATOR . str_replace(['../', '/'], ['', DIRECTORY_SEPARATOR], $existingPath);
+        if (is_file($existingAbsolutePath)) {
+            @unlink($existingAbsolutePath);
+        }
+    }
+
+    return ['../assets/instructor_photos/' . $fileName, null];
+}
+
+function buildInstructorWriteData(array $availableColumns, array $baseData, array $optionalData = []) {
+    $data = $baseData;
+    foreach ($optionalData as $column => $value) {
+        if (isset($availableColumns[$column])) {
+            $data[$column] = $value;
+        }
+    }
+    return $data;
+}
+
+// Fetch subjects for instructor subject-priority assignment (used for UI + validation)
+$subjects_for_assignment = $pdo->query("
+    SELECT id, subject_code, subject_name
+    FROM subjects
+    ORDER BY subject_code
+")->fetchAll();
+
+$valid_subject_code_map = [];
+foreach ($subjects_for_assignment as $subject_row) {
+    $code = strtoupper(trim((string)($subject_row['subject_code'] ?? '')));
+    if ($code !== '') {
+        // Keep canonical subject code as stored in DB
+        $valid_subject_code_map[$code] = (string)$subject_row['subject_code'];
+    }
+}
+
+function normalizeDeloadText($value) {
+    return trim((string)($value ?? ''));
+}
+
+function normalizeDeloadUnits($value) {
+    if ($value === null || $value === '') {
+        return 0.00;
+    }
+    $units = (float)$value;
+    if ($units < 0) {
+        $units = 0;
+    }
+    return round($units, 2);
+}
+
+function normalizeResearchExtensionType($value) {
+    $normalized = strtolower(trim((string)($value ?? '')));
+    $allowed = ['research', 'extension', 'both'];
+    return in_array($normalized, $allowed, true) ? $normalized : '';
+}
+
+function formatResearchExtensionType($value) {
+    $normalized = normalizeResearchExtensionType($value);
+    if ($normalized === 'both') {
+        return 'Research/Extension';
+    }
+    return $normalized ? ucfirst($normalized) : '-';
+}
+
+function normalizeInstructorStatus($value) {
+    $normalized = strtolower(trim((string)($value ?? '')));
+    if ($normalized === 'permanent') {
+        return 'Permanent';
+    }
+    // Accept common typo but store canonical value.
+    if ($normalized === 'contractual' || $normalized === 'contructual') {
+        return 'Contractual';
+    }
+    if ($normalized === 'temporary') {
+        return 'Temporary';
+    }
+    return '';
+}
+
+function normalizeSpecializationSelection(array $rawValues, array $validCodeMap) {
+    $result = [];
+    foreach ($rawValues as $raw) {
+        $code = strtoupper(trim((string)$raw));
+        if ($code === '') {
+            continue;
+        }
+        if (!isset($validCodeMap[$code])) {
+            continue;
+        }
+        $canonical = $validCodeMap[$code];
+        if (!in_array($canonical, $result, true)) {
+            $result[] = $canonical;
+        }
+    }
+    return $result;
+}
 
 // Handle Add/Edit/Delete operations
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -15,11 +154,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $email = $_POST['email'];
         $full_name = $_POST['full_name'];
         $department = $_POST['department'];
-        $specializations = array_values(array_unique(array_filter([$_POST['specialization_1'] ?? '', $_POST['specialization_2'] ?? '', $_POST['specialization_3'] ?? ''])));
+        $status = normalizeInstructorStatus($_POST['status'] ?? '');
+        $specializations = normalizeSpecializationSelection([
+            $_POST['specialization_1'] ?? '',
+            $_POST['specialization_2'] ?? '',
+            $_POST['specialization_3'] ?? '',
+            $_POST['specialization_4'] ?? '',
+            $_POST['specialization_5'] ?? ''
+        ], $valid_subject_code_map);
         $max_hours = $_POST['max_hours_per_week'];
         $program_id = !empty($_POST['program_id']) ? $_POST['program_id'] : null;
+        $designation = normalizeDeloadText($_POST['designation'] ?? '');
+        $designation_units = normalizeDeloadUnits($_POST['designation_units'] ?? 0);
+        $research_extension = normalizeResearchExtensionType($_POST['research_extension'] ?? '');
+        $research_extension_units = normalizeDeloadUnits($_POST['research_extension_units'] ?? 0);
+        $special_assignment = normalizeDeloadText($_POST['special_assignment'] ?? '');
+        $special_assignment_units = normalizeDeloadUnits($_POST['special_assignment_units'] ?? 0);
+        $rank = trim($_POST['rank'] ?? '');
+        $education = trim($_POST['education'] ?? '');
+        $eligibility = trim($_POST['eligibility'] ?? '');
+        $service_years = trim($_POST['service_years'] ?? '');
         
         try {
+            [$photo_path, $photo_warning] = handleInstructorPhotoUpload($instructor_columns, 'photo');
+            if ($photo_warning) {
+                $non_blocking_warnings[] = $photo_warning;
+            }
+
             // Start transaction
             $pdo->beginTransaction();
             
@@ -28,9 +189,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute([$username, $password, $email, $full_name]);
             $user_id = $pdo->lastInsertId();
             
-            // Insert into instructors table with program_id
-            $stmt = $pdo->prepare("INSERT INTO instructors (user_id, department, max_hours_per_week, program_id) VALUES (?, ?, ?, ?)");
-            $stmt->execute([$user_id, $department, $max_hours, $program_id]);
+            $instructor_data = buildInstructorWriteData(
+                $instructor_columns,
+                [
+                    'user_id' => $user_id,
+                    'department' => $department,
+                    'status' => $status,
+                    'max_hours_per_week' => $max_hours,
+                    'program_id' => $program_id,
+                    'designation' => $designation,
+                    'designation_units' => $designation_units,
+                    'research_extension' => $research_extension,
+                    'research_extension_units' => $research_extension_units,
+                    'special_assignment' => $special_assignment,
+                    'special_assignment_units' => $special_assignment_units
+                ],
+                [
+                    'rank' => $rank,
+                    'education' => $education,
+                    'eligibility' => $eligibility,
+                    'service_years' => $service_years,
+                    'photo' => $photo_path
+                ]
+            );
+            $columns = array_keys($instructor_data);
+            $placeholders = implode(', ', array_fill(0, count($columns), '?'));
+            $stmt = $pdo->prepare("INSERT INTO instructors (" . implode(', ', $columns) . ") VALUES ($placeholders)");
+            $stmt->execute(array_values($instructor_data));
+
             $instructor_id = $pdo->lastInsertId();
             
             // Insert specializations
@@ -51,8 +237,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             $pdo->commit();
             $message = "Instructor added successfully!";
+            if (!empty($non_blocking_warnings)) {
+                $message .= ' ' . implode(' ', $non_blocking_warnings);
+            }
         } catch (Exception $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $error = "Error adding instructor: " . $e->getMessage();
         }
     }
@@ -62,26 +253,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $email = $_POST['email'];
         $full_name = $_POST['full_name'];
         $department = $_POST['department'];
-        $specializations = array_values(array_unique(array_filter([$_POST['specialization_1'] ?? '', $_POST['specialization_2'] ?? '', $_POST['specialization_3'] ?? ''])));
+        $status = normalizeInstructorStatus($_POST['status'] ?? '');
+        $specializations = normalizeSpecializationSelection([
+            $_POST['specialization_1'] ?? '',
+            $_POST['specialization_2'] ?? '',
+            $_POST['specialization_3'] ?? '',
+            $_POST['specialization_4'] ?? '',
+            $_POST['specialization_5'] ?? ''
+        ], $valid_subject_code_map);
         $max_hours = $_POST['max_hours_per_week'];
         $program_id = !empty($_POST['program_id']) ? $_POST['program_id'] : null;
+        $designation = normalizeDeloadText($_POST['designation'] ?? '');
+        $designation_units = normalizeDeloadUnits($_POST['designation_units'] ?? 0);
+        $research_extension = normalizeResearchExtensionType($_POST['research_extension'] ?? '');
+        $research_extension_units = normalizeDeloadUnits($_POST['research_extension_units'] ?? 0);
+        $special_assignment = normalizeDeloadText($_POST['special_assignment'] ?? '');
+        $special_assignment_units = normalizeDeloadUnits($_POST['special_assignment_units'] ?? 0);
+        $rank = trim($_POST['rank'] ?? '');
+        $education = trim($_POST['education'] ?? '');
+        $eligibility = trim($_POST['eligibility'] ?? '');
+        $service_years = trim($_POST['service_years'] ?? '');
         
         try {
             // Start transaction
             $pdo->beginTransaction();
             
             // Get user_id from instructor
-            $stmt = $pdo->prepare("SELECT user_id FROM instructors WHERE id = ?");
+            $select_fields = 'user_id';
+            if (isset($instructor_columns['photo'])) {
+                $select_fields .= ', photo';
+            }
+            $stmt = $pdo->prepare("SELECT $select_fields FROM instructors WHERE id = ?");
             $stmt->execute([$id]);
-            $user_id = $stmt->fetchColumn();
+            $instructor_row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $user_id = $instructor_row['user_id'] ?? null;
+            $existing_photo = $instructor_row['photo'] ?? null;
+
+            [$photo_path, $photo_warning] = handleInstructorPhotoUpload($instructor_columns, 'photo', $existing_photo);
+            if ($photo_warning) {
+                $non_blocking_warnings[] = $photo_warning;
+            }
             
             // Update users table
             $stmt = $pdo->prepare("UPDATE users SET email = ?, full_name = ? WHERE id = ?");
             $stmt->execute([$email, $full_name, $user_id]);
             
-            // Update instructors table with program_id
-            $stmt = $pdo->prepare("UPDATE instructors SET department = ?, max_hours_per_week = ?, program_id = ? WHERE id = ?");
-            $stmt->execute([$department, $max_hours, $program_id, $id]);
+            $instructor_data = buildInstructorWriteData(
+                $instructor_columns,
+                [
+                    'department' => $department,
+                    'status' => $status,
+                    'max_hours_per_week' => $max_hours,
+                    'program_id' => $program_id,
+                    'designation' => $designation,
+                    'designation_units' => $designation_units,
+                    'research_extension' => $research_extension,
+                    'research_extension_units' => $research_extension_units,
+                    'special_assignment' => $special_assignment,
+                    'special_assignment_units' => $special_assignment_units
+                ],
+                [
+                    'rank' => $rank,
+                    'education' => $education,
+                    'eligibility' => $eligibility,
+                    'service_years' => $service_years,
+                    'photo' => $photo_path
+                ]
+            );
+            $assignments = [];
+            foreach (array_keys($instructor_data) as $column) {
+                $assignments[] = $column . ' = ?';
+            }
+            $stmt = $pdo->prepare("UPDATE instructors SET " . implode(', ', $assignments) . " WHERE id = ?");
+            $stmt->execute(array_merge(array_values($instructor_data), [$id]));
+
             
             // Delete existing specializations
             $stmt = $pdo->prepare("DELETE FROM instructor_specializations WHERE instructor_id = ?");
@@ -105,8 +350,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             $pdo->commit();
             $message = "Instructor updated successfully!";
+            if (!empty($non_blocking_warnings)) {
+                $message .= ' ' . implode(' ', $non_blocking_warnings);
+            }
         } catch (Exception $e) {
-            $pdo->rollBack();
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
             $error = "Error updating instructor: " . $e->getMessage();
         }
     }
@@ -159,11 +409,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Error updating availability: " . $e->getMessage();
         }
     }
+
+    if (isset($_POST['set_all_instructors_availability'])) {
+        try {
+            $pdo->beginTransaction();
+
+            $instructor_count = (int)$pdo->query("SELECT COUNT(*) FROM instructors")->fetchColumn();
+            $slot_count = (int)$pdo->query("SELECT COUNT(*) FROM time_slots")->fetchColumn();
+
+            $pdo->exec("DELETE FROM instructor_availability");
+
+            if ($instructor_count > 0 && $slot_count > 0) {
+                $pdo->exec("
+                    INSERT INTO instructor_availability (instructor_id, time_slot_id, is_available)
+                    SELECT i.id, ts.id, 1
+                    FROM instructors i
+                    CROSS JOIN time_slots ts
+                ");
+            }
+
+            $pdo->commit();
+            $message = "All instructors are now available for all time slots.";
+        } catch (Exception $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $error = "Error applying availability to all instructors: " . $e->getMessage();
+        }
+    }
 }
 
 // Fetch all instructors with details and specializations
 $instructors = $pdo->query("
-    SELECT i.id, i.user_id, i.department, i.max_hours_per_week, i.program_id, u.username, u.email, u.full_name 
+    SELECT i.id, i.user_id, i.department, i.status, i.max_hours_per_week, i.program_id, i.designation, i.designation_units, i.research_extension, i.research_extension_units, i.special_assignment, i.special_assignment_units, u.username, u.email, u.full_name 
     FROM instructors i 
     JOIN users u ON i.user_id = u.id 
     ORDER BY u.full_name
@@ -172,15 +450,12 @@ $instructors = $pdo->query("
 // Fetch programs for dropdown
 $programs = $pdo->query("SELECT * FROM programs ORDER BY program_name")->fetchAll();
 
-// Fetch subjects for instructor subject-priority assignment
-$subjects_for_assignment = $pdo->query("
-    SELECT id, subject_code, subject_name
-    FROM subjects
-    ORDER BY subject_code
-")->fetchAll();
-
 // Fetch time slots for availability modal
-$time_slots = $pdo->query("SELECT * FROM time_slots ORDER BY day, start_time")->fetchAll();
+$time_slots = $pdo->query("
+    SELECT *, COALESCE(slot_type, 'regular') AS slot_type
+    FROM time_slots
+    ORDER BY FIELD(day,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), start_time
+")->fetchAll();
 
 // Function to get specializations for an instructor
 function getInstructorSpecializations($pdo, $instructor_id) {
@@ -265,31 +540,79 @@ function getProgramName($pdo, $program_id) {
         
         .action-buttons {
             display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0;
+        }
+
+        .action-row {
+            display: flex;
             gap: 5px;
+        }
+
+        .bottom-row {
+            margin-top: 4px;
+        }
+
+        .action-buttons form {
+            margin: 0;
+            display: inline-flex;
         }
         
         .btn-icon {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
+            padding: 9px 14px;
+            border: 1px solid transparent;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s, transform 0.2s;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.01em;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease, background-color 0.18s ease;
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         }
         
         .btn-icon:hover {
-            transform: translateY(-2px);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
+            filter: brightness(1.03);
         }
 
-        .btn-edit { background-color: #ffc107; color: #212529; }
-        .btn-edit:hover { background-color: #e0a800; }
+        .btn-icon:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        }
+
+        .btn-icon:focus-visible {
+            outline: 3px solid rgba(59, 130, 246, 0.35);
+            outline-offset: 2px;
+        }
+
+        .btn-edit {
+            background: linear-gradient(135deg, #f59e0b, #fbbf24);
+            border-color: #d97706;
+            color: #1f2937;
+        }
         .btn-availability { background-color: #17a2b8; color: #fff; }
         .btn-availability:hover { background-color: #138496; }
-        .btn-delete { background-color: #dc3545; color: #fff; }
-        .btn-delete:hover { background-color: #c82333; }
+        .btn-delete {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+            border-color: #b91c1c;
+            color: #fff;
+        }
+
+        .btn-profile {
+            background: linear-gradient(135deg, #3b82f6, #60a5fa);
+            border-color: #2563eb;
+            color: #fff;
+        }
+        .btn-profile:hover {
+            background: linear-gradient(135deg, #2563eb, #3b82f6);
+        }
+
 
         .search-toolbar {
             margin: 14px 0 18px;
@@ -299,6 +622,13 @@ function getProgramName($pdo, $program_id) {
             display: block;
             font-weight: 600;
             margin-bottom: 6px;
+        }
+
+        .page-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
         }
 
         .search-input-wrap {
@@ -367,8 +697,12 @@ function getProgramName($pdo, $program_id) {
             </div>
         </div>
 
-        <!-- Add Instructor Button -->
-        <button class="btn-primary" onclick="openModal('addModal')">➕ Add New Instructor</button>
+        <div class="page-actions">
+            <button class="btn-primary" onclick="openModal('addModal')">➕ Add New Instructor</button>
+            <form method="POST" onsubmit="return confirm('Make every time slot available for every instructor? This will replace all current instructor availability settings.')">
+                <button type="submit" name="set_all_instructors_availability" class="btn-secondary">Make All Instructors Fully Available</button>
+            </form>
+        </div>
         
         <!-- Instructors Table -->
         <table class="data-table">
@@ -378,8 +712,10 @@ function getProgramName($pdo, $program_id) {
                     <th>Username</th>
                     <th>Email</th>
                     <th>Department</th>
+                    <th>Status</th>
                     <th>Program</th>
                     <th>Subject Assignments</th>
+                    <th>Nature of Designation / Units Deloading</th>
                     <th>Max Hours/Week</th>
                     <th>Actions</th>
                 </tr>
@@ -391,27 +727,51 @@ function getProgramName($pdo, $program_id) {
                     $instructor['username'] . ' ' .
                     $instructor['email'] . ' ' .
                     $instructor['department'] . ' ' .
+                    $instructor['status'] . ' ' .
                     (getProgramName($pdo, $instructor['program_id']) ?: 'all programs') . ' ' .
+                    $instructor['designation'] . ' ' .
+                    $instructor['research_extension'] . ' ' .
+                    $instructor['special_assignment'] . ' ' .
                     implode(' ', getInstructorSpecializations($pdo, $instructor['id']))
                 )); ?>">
                     <td><?php echo htmlspecialchars($instructor['full_name']); ?></td>
                     <td><?php echo htmlspecialchars($instructor['username']); ?></td>
                     <td><?php echo htmlspecialchars($instructor['email']); ?></td>
                     <td><?php echo htmlspecialchars($instructor['department']); ?></td>
+                    <td><?php echo htmlspecialchars($instructor['status'] ?: '-'); ?></td>
                     <td><?php echo htmlspecialchars(getProgramName($pdo, $instructor['program_id']) ?: 'All Programs'); ?></td>
                     <td><?php 
                         $specs = getInstructorSpecializations($pdo, $instructor['id']);
                         echo htmlspecialchars(implode(', ', $specs) ?: '(No subject assignment)'); 
                     ?></td>
+                    <td>
+                        <?php
+                            $designation_units = (float)($instructor['designation_units'] ?? 0);
+                            $research_extension_units = (float)($instructor['research_extension_units'] ?? 0);
+                            $special_assignment_units = (float)($instructor['special_assignment_units'] ?? 0);
+                            $research_extension_label = formatResearchExtensionType($instructor['research_extension'] ?? '');
+                            $total_deload = $designation_units + $research_extension_units + $special_assignment_units;
+                        ?>
+                        <div><strong>Designation:</strong> <?php echo htmlspecialchars($instructor['designation'] ?: '-'); ?> (<?php echo number_format($designation_units, 2); ?>)</div>
+                        <div><strong>Research/Extension:</strong> <?php echo htmlspecialchars($research_extension_label); ?> (<?php echo number_format($research_extension_units, 2); ?>)</div>
+                        <div><strong>Special Assignment:</strong> <?php echo htmlspecialchars($instructor['special_assignment'] ?: '-'); ?> (<?php echo number_format($special_assignment_units, 2); ?>)</div>
+                        <div><strong>Total Deload:</strong> <?php echo number_format($total_deload, 2); ?></div>
+                    </td>
                     <td><?php echo $instructor['max_hours_per_week']; ?></td>
                     <td class="action-buttons">
-                        <button class="btn-icon btn-edit" onclick="editInstructor(<?php echo $instructor['id']; ?>)"><i class="fas fa-edit"></i> Edit</button>
-                        <button class="btn-icon btn-availability" onclick="setAvailability(<?php echo $instructor['id']; ?>, '<?php echo htmlspecialchars(addslashes($instructor['full_name'])); ?>')"><i class="fas fa-calendar-alt"></i> Availability</button>
-                        <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this instructor? This action cannot be undone.')">
-                            <input type="hidden" name="instructor_id" value="<?php echo $instructor['id']; ?>">
-                            <button type="submit" name="delete_instructor" class="btn-icon btn-delete"><i class="fas fa-trash-alt"></i> Delete</button>
-                        </form>
+                        <div class="action-row top-row">
+                            <a href="view_instructor.php?id=<?php echo $instructor['id']; ?>" class="btn-icon btn-profile" title="View Profile"><i class="fas fa-user"></i> Profile</a>
+                            <button class="btn-icon btn-edit" onclick="editInstructor(<?php echo $instructor['id']; ?>)"><i class="fas fa-edit"></i> Edit</button>
+                        </div>
+                        <div class="action-row bottom-row">
+                            <button class="btn-icon btn-availability" onclick="setAvailability(<?php echo $instructor['id']; ?>, '<?php echo htmlspecialchars(addslashes($instructor['full_name'])); ?>')"><i class="fas fa-calendar-alt"></i> Availability</button>
+                            <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this instructor? This action cannot be undone.')" >
+                                <input type="hidden" name="instructor_id" value="<?php echo $instructor['id']; ?>">
+                                <button type="submit" name="delete_instructor" class="btn-icon btn-delete"><i class="fas fa-trash-alt"></i> Delete</button>
+                            </form>
+                        </div>
                     </td>
+
                 </tr>
                 <?php endforeach; ?>
             </tbody>
@@ -423,7 +783,14 @@ function getProgramName($pdo, $program_id) {
         <div class="modal-content">
             <span class="close" onclick="closeModal('addModal')">&times;</span>
             <h2>Add New Instructor</h2>
-            <form method="POST">
+            <datalist id="subject_code_options">
+                <?php foreach ($subjects_for_assignment as $subject): ?>
+                    <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
+                        <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </datalist>
+            <form method="POST" enctype="multipart/form-data">
                 <div class="form-group">
                     <label for="username">Username:</label>
                     <input type="text" id="username" name="username" required>
@@ -443,10 +810,47 @@ function getProgramName($pdo, $program_id) {
                     <label for="full_name">Full Name:</label>
                     <input type="text" id="full_name" name="full_name" required>
                 </div>
+
+                <div class="form-group">
+                    <label for="photo">Profile Photo:</label>
+                    <input type="file" id="photo" name="photo" accept="image/*">
+                    <small>Optional - JPG/PNG, max 2MB</small>
+                </div>
+
+                <h3>Profile Information</h3>
+                <div class="form-group">
+                    <label for="rank">Rank:</label>
+                    <input type="text" id="rank" name="rank" placeholder="Instructor / Assistant Professor">
+                </div>
+                
+                <div class="form-group">
+                    <label for="education">Educational Background:</label>
+                    <textarea id="education" name="education" rows="2" placeholder="e.g., MS Computer Science, University of ..."></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="eligibility">Eligibility:</label>
+                    <input type="text" id="eligibility" name="eligibility" placeholder="PRC LET / Civil Service">
+                </div>
+                
+                <div class="form-group">
+                    <label for="service_years">Length of Service:</label>
+                    <input type="text" id="service_years" name="service_years" placeholder="10 years">
+                </div>
                 
                 <div class="form-group">
                     <label for="department">Department:</label>
                     <input type="text" id="department" name="department" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="status">Status:</label>
+                    <select id="status" name="status" required>
+                        <option value="">Select Status</option>
+                        <option value="Permanent">Permanent</option>
+                        <option value="Contractual">Contractual</option>
+                        <option value="Temporary">Temporary</option>
+                    </select>
                 </div>
                 
                 <div class="form-group">
@@ -461,57 +865,76 @@ function getProgramName($pdo, $program_id) {
                     </select>
                 </div>
                 
-                <h3>Preferred Subjects (up to 3, by priority)</h3>
+                <h3>Preferred Subjects (up to 5, by priority)</h3>
                 <div class="form-group">
                     <label for="specialization_1">Primary Subject:</label>
-                    <select id="specialization_1" name="specialization_1">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="specialization_1" name="specialization_1" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_2">Secondary Subject:</label>
-                    <select id="specialization_2" name="specialization_2">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="specialization_2" name="specialization_2" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_3">Tertiary Subject:</label>
-                    <select id="specialization_3" name="specialization_3">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="specialization_3" name="specialization_3" list="subject_code_options" placeholder="Search subject code...">
+                </div>
+                <div class="form-group">
+                    <label for="specialization_4">4th Subject:</label>
+                    <input type="text" id="specialization_4" name="specialization_4" list="subject_code_options" placeholder="Search subject code...">
+                </div>
+                <div class="form-group">
+                    <label for="specialization_5">5th Subject (Extra Subject):</label>
+                    <input type="text" id="specialization_5" name="specialization_5" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 
                 <div class="form-group">
                     <label for="max_hours_per_week">Max Hours per Week:</label>
                     <input type="number" id="max_hours_per_week" name="max_hours_per_week" min="1" max="40" value="20" required>
                 </div>
+
+                <h3>Nature of Designation / Units Deloading</h3>
+                <div class="form-group">
+                    <label for="designation">Designation:</label>
+                    <input type="text" id="designation" name="designation" placeholder="e.g., Program Coordinator, BSCS">
+                </div>
+                <div class="form-group">
+                    <label for="designation_units">Designation Units Deloading:</label>
+                    <input type="number" id="designation_units" name="designation_units" min="0" step="0.5" value="0">
+                </div>
+                <div class="form-group">
+                    <label for="research_extension">Research / Extension:</label>
+                    <select id="research_extension" name="research_extension">
+                        <option value="">Select Type</option>
+                        <option value="research">Research</option>
+                        <option value="extension">Extension</option>
+                        <option value="both">Research/Extension</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="research_extension_units">Research / Extension Units Deloading:</label>
+                    <input type="number" id="research_extension_units" name="research_extension_units" min="0" step="0.5" value="0">
+                </div>
+                <div class="form-group">
+                    <label for="special_assignment">Special Assignment:</label>
+                    <input type="text" id="special_assignment" name="special_assignment" placeholder="e.g., TBI Coordinator">
+                </div>
+                <div class="form-group">
+                    <label for="special_assignment_units">Special Assignment Units Deloading:</label>
+                    <input type="number" id="special_assignment_units" name="special_assignment_units" min="0" step="0.5" value="0">
+                </div>
                 
                 <button type="submit" name="add_instructor" class="btn-primary">Add Instructor</button>
             </form>
         </div>
     </div>
+
     
     <!-- Edit Instructor Modal -->
     <div id="editModal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('editModal')">&times;</span>
             <h2>Edit Instructor</h2>
-            <form method="POST" id="editForm">
+            <form method="POST" id="editForm" enctype="multipart/form-data">
                 <input type="hidden" id="edit_id" name="instructor_id">
                 
                 <div class="form-group">
@@ -523,10 +946,47 @@ function getProgramName($pdo, $program_id) {
                     <label for="edit_full_name">Full Name:</label>
                     <input type="text" id="edit_full_name" name="full_name" required>
                 </div>
+
+                <div class="form-group">
+                    <label for="edit_photo">Profile Photo:</label>
+                    <input type="file" id="edit_photo" name="photo" accept="image/*">
+                    <small>Optional - JPG/PNG, max 2MB (current photo remains if empty)</small>
+                </div>
+
+                <h3>Profile Information</h3>
+                <div class="form-group">
+                    <label for="edit_rank">Rank:</label>
+                    <input type="text" id="edit_rank" name="rank">
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_education">Educational Background:</label>
+                    <textarea id="edit_education" name="education" rows="2"></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_eligibility">Eligibility:</label>
+                    <input type="text" id="edit_eligibility" name="eligibility">
+                </div>
+                
+                <div class="form-group">
+                    <label for="edit_service_years">Length of Service:</label>
+                    <input type="text" id="edit_service_years" name="service_years">
+                </div>
                 
                 <div class="form-group">
                     <label for="edit_department">Department:</label>
                     <input type="text" id="edit_department" name="department" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="edit_status">Status:</label>
+                    <select id="edit_status" name="status" required>
+                        <option value="">Select Status</option>
+                        <option value="Permanent">Permanent</option>
+                        <option value="Contractual">Contractual</option>
+                        <option value="Temporary">Temporary</option>
+                    </select>
                 </div>
                 
                 <div class="form-group">
@@ -541,44 +1001,62 @@ function getProgramName($pdo, $program_id) {
                     </select>
                 </div>
                 
-                <h3>Preferred Subjects (up to 3, by priority)</h3>
+                <h3>Preferred Subjects (up to 5, by priority)</h3>
                 <div class="form-group">
                     <label for="edit_specialization_1">Primary Subject:</label>
-                    <select id="edit_specialization_1" name="specialization_1">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="edit_specialization_1" name="specialization_1" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_2">Secondary Subject:</label>
-                    <select id="edit_specialization_2" name="specialization_2">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="edit_specialization_2" name="specialization_2" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_3">Tertiary Subject:</label>
-                    <select id="edit_specialization_3" name="specialization_3">
-                        <option value="">Select Subject</option>
-                        <?php foreach ($subjects_for_assignment as $subject): ?>
-                            <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                                <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="edit_specialization_3" name="specialization_3" list="subject_code_options" placeholder="Search subject code...">
+                </div>
+                <div class="form-group">
+                    <label for="edit_specialization_4">4th Subject:</label>
+                    <input type="text" id="edit_specialization_4" name="specialization_4" list="subject_code_options" placeholder="Search subject code...">
+                </div>
+                <div class="form-group">
+                    <label for="edit_specialization_5">5th Subject (Extra Subject):</label>
+                    <input type="text" id="edit_specialization_5" name="specialization_5" list="subject_code_options" placeholder="Search subject code...">
                 </div>
                 
                 <div class="form-group">
                     <label for="edit_max_hours">Max Hours per Week:</label>
                     <input type="number" id="edit_max_hours" name="max_hours_per_week" min="1" max="40" required>
+                </div>
+
+                <h3>Nature of Designation / Units Deloading</h3>
+                <div class="form-group">
+                    <label for="edit_designation">Designation:</label>
+                    <input type="text" id="edit_designation" name="designation">
+                </div>
+                <div class="form-group">
+                    <label for="edit_designation_units">Designation Units Deloading:</label>
+                    <input type="number" id="edit_designation_units" name="designation_units" min="0" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="edit_research_extension">Research / Extension:</label>
+                    <select id="edit_research_extension" name="research_extension">
+                        <option value="">Select Type</option>
+                        <option value="research">Research</option>
+                        <option value="extension">Extension</option>
+                        <option value="both">Research/Extension</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="edit_research_extension_units">Research / Extension Units Deloading:</label>
+                    <input type="number" id="edit_research_extension_units" name="research_extension_units" min="0" step="0.5">
+                </div>
+                <div class="form-group">
+                    <label for="edit_special_assignment">Special Assignment:</label>
+                    <input type="text" id="edit_special_assignment" name="special_assignment">
+                </div>
+                <div class="form-group">
+                    <label for="edit_special_assignment_units">Special Assignment Units Deloading:</label>
+                    <input type="number" id="edit_special_assignment_units" name="special_assignment_units" min="0" step="0.5">
                 </div>
                 
                 <button type="submit" name="edit_instructor" class="btn-primary">Update Instructor</button>
@@ -597,16 +1075,29 @@ function getProgramName($pdo, $program_id) {
                 <div class="availability-grid">
                     <?php foreach ($time_slots as $slot): ?>
                     <label class="availability-item">
-                        <input type="checkbox" name="time_slots[]" value="<?php echo $slot['id']; ?>" id="slot_<?php echo $slot['id']; ?>">
+                        <input
+                            type="checkbox"
+                            name="time_slots[]"
+                            value="<?php echo $slot['id']; ?>"
+                            id="slot_<?php echo $slot['id']; ?>"
+                            data-day="<?php echo htmlspecialchars(strtolower((string)$slot['day'])); ?>"
+                            data-slot-type="<?php echo htmlspecialchars(strtolower((string)($slot['slot_type'] ?? 'regular'))); ?>"
+                        >
                         <?php echo $slot['day']; ?>: 
                         <?php echo date('g:i A', strtotime($slot['start_time'])); ?> - 
                         <?php echo date('g:i A', strtotime($slot['end_time'])); ?>
+                        <?php if (($slot['slot_type'] ?? 'regular') !== 'regular'): ?>
+                            (<?php echo htmlspecialchars(ucfirst((string)$slot['slot_type'])); ?>)
+                        <?php endif; ?>
                     </label>
                     <?php endforeach; ?>
                 </div>
                 
                 <div class="form-actions">
                     <button type="submit" name="set_availability" class="btn-primary">Save Availability</button>
+                    <button type="button" onclick="applyWeekdayDefaultAvailability()" class="btn-secondary">Weekdays Default</button>
+                    <button type="button" onclick="enableSaturdayTypeAvailability(['makeup'])" class="btn-secondary">Saturday Makeup</button>
+                    <button type="button" onclick="enableSaturdayTypeAvailability(['summer'])" class="btn-secondary">Saturday Summer</button>
                     <button type="button" onclick="selectAllAvailability()" class="btn-secondary">Select All</button>
                     <button type="button" onclick="deselectAllAvailability()" class="btn-secondary">Deselect All</button>
                 </div>
@@ -635,10 +1126,23 @@ function getProgramName($pdo, $program_id) {
                     document.getElementById('edit_email').value = data.email;
                     document.getElementById('edit_full_name').value = data.full_name;
                     document.getElementById('edit_department').value = data.department;
+                    document.getElementById('edit_status').value = data.status || '';
                     document.getElementById('edit_specialization_1').value = data.specializations?.[0] || '';
                     document.getElementById('edit_specialization_2').value = data.specializations?.[1] || '';
                     document.getElementById('edit_specialization_3').value = data.specializations?.[2] || '';
+                    document.getElementById('edit_specialization_4').value = data.specializations?.[3] || '';
+                    document.getElementById('edit_specialization_5').value = data.specializations?.[4] || '';
                     document.getElementById('edit_max_hours').value = data.max_hours_per_week;
+                    document.getElementById('edit_designation').value = data.designation || '';
+                    document.getElementById('edit_designation_units').value = data.designation_units || 0;
+                    document.getElementById('edit_research_extension').value = data.research_extension || '';
+                    document.getElementById('edit_research_extension_units').value = data.research_extension_units || 0;
+                    document.getElementById('edit_special_assignment').value = data.special_assignment || '';
+                    document.getElementById('edit_special_assignment_units').value = data.special_assignment_units || 0;
+                    document.getElementById('edit_rank').value = data.rank || '';
+                    document.getElementById('edit_education').value = data.education || '';
+                    document.getElementById('edit_eligibility').value = data.eligibility || '';
+                    document.getElementById('edit_service_years').value = data.service_years || '';
                     
                     // Set program dropdown
                     const programSelect = document.getElementById('edit_program_id');
@@ -659,14 +1163,43 @@ function getProgramName($pdo, $program_id) {
                     // Uncheck all checkboxes first
                     document.querySelectorAll('input[name="time_slots[]"]').forEach(cb => cb.checked = false);
                     
-                    // Check the available slots
-                    data.forEach(slotId => {
-                        const checkbox = document.getElementById(`slot_${slotId}`);
-                        if (checkbox) checkbox.checked = true;
-                    });
+                    // If no saved availability yet, default to Monday-Friday only.
+                    if (!Array.isArray(data) || data.length === 0) {
+                        applyWeekdayDefaultAvailability();
+                    } else {
+                        // Check the available slots
+                        data.forEach(slotId => {
+                            const checkbox = document.getElementById(`slot_${slotId}`);
+                            if (checkbox) checkbox.checked = true;
+                        });
+                    }
                     
                     openModal('availabilityModal');
                 });
+        }
+
+        function getAvailabilityCheckboxes() {
+            return Array.from(document.querySelectorAll('input[name="time_slots[]"]'));
+        }
+
+        function applyWeekdayDefaultAvailability() {
+            getAvailabilityCheckboxes().forEach(cb => {
+                const day = (cb.dataset.day || '').toLowerCase();
+                cb.checked = day !== 'saturday';
+            });
+        }
+
+        function enableSaturdayTypeAvailability(slotTypes) {
+            const allowed = new Set((slotTypes || []).map(t => String(t).toLowerCase()));
+            getAvailabilityCheckboxes().forEach(cb => {
+                const day = (cb.dataset.day || '').toLowerCase();
+                const slotType = (cb.dataset.slotType || '').toLowerCase();
+                if (day === 'saturday') {
+                    cb.checked = allowed.has(slotType);
+                } else {
+                    cb.checked = true;
+                }
+            });
         }
         
         function selectAllAvailability() {

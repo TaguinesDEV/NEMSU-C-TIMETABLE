@@ -12,6 +12,45 @@ $pdo = getDB();
 $message = '';
 $error = '';
 
+function normalizeSemester($value) {
+    $semester = trim((string)($value ?? ''));
+    $allowed = ['1st Semester', '2nd Semester', 'Summer'];
+    return in_array($semester, $allowed, true) ? $semester : '1st Semester';
+}
+
+function normalizeYearLevelSelection($value) {
+    $yearLevel = (int)($value ?? 1);
+    if ($yearLevel < 1 || $yearLevel > 5) {
+        return 1;
+    }
+    return $yearLevel;
+}
+
+function preferProgramSubjects(array $subjects): array {
+    $bestByCode = [];
+    foreach ($subjects as $subject) {
+        $code = strtoupper(trim((string)($subject['subject_code'] ?? '')));
+        if ($code === '') {
+            continue;
+        }
+        $isScoped = !empty($subject['program_id']);
+        if (!isset($bestByCode[$code]) || ($isScoped && !$bestByCode[$code]['is_scoped'])) {
+            $bestByCode[$code] = [
+                'is_scoped' => $isScoped,
+                'subject' => $subject,
+            ];
+        }
+    }
+
+    return array_values(array_map(function ($entry) {
+        return $entry['subject'];
+    }, $bestByCode));
+}
+
+$selected_semester = normalizeSemester($_POST['semester'] ?? $_GET['semester'] ?? '1st Semester');
+$selected_schedule_mode = $_POST['schedule_mode'] ?? $_GET['schedule_mode'] ?? 'single';
+$selected_year_level = normalizeYearLevelSelection($_POST['year_level'] ?? $_GET['year_level'] ?? 1);
+
 // Get program chair's program
 $stmt = $pdo->prepare("
     SELECT pc.*, p.program_name 
@@ -28,23 +67,57 @@ if (!$programChair) {
 
 $program_id = $programChair['program_id'];
 
-// Fetch data for dropdowns - include program-specific + all-program instructors
+// Fetch data for dropdowns - include all instructors so cross-program sharing is possible
 $instructors = $pdo->prepare("
-    SELECT i.*, u.full_name 
+    SELECT i.*, u.full_name, p.program_name
     FROM instructors i 
     JOIN users u ON i.user_id = u.id
-    WHERE i.program_id = ?
-       OR i.program_id IS NULL
-       OR i.program_id = 0
+    LEFT JOIN programs p ON i.program_id = p.id
     ORDER BY u.full_name
 ");
-$instructors->execute([$program_id]);
+$instructors->execute();
 $instructors = $instructors->fetchAll();
 
+$own_program_instructors = [];
+$cross_program_instructors = [];
+foreach ($instructors as $inst) {
+    $inst_program_id = (int)($inst['program_id'] ?? 0);
+    if ($inst_program_id === (int)$program_id) {
+        $own_program_instructors[] = $inst;
+    } else {
+        $cross_program_instructors[] = $inst;
+    }
+}
+
 $rooms = $pdo->query("SELECT * FROM rooms")->fetchAll();
-$subjects = $pdo->prepare("SELECT * FROM subjects WHERE program_id = ?");
-$subjects->execute([$program_id]);
+$subject_columns = [];
+foreach ($pdo->query("SHOW COLUMNS FROM subjects")->fetchAll(PDO::FETCH_ASSOC) as $col) {
+    $subject_columns[$col['Field']] = true;
+}
+$has_subject_semester = isset($subject_columns['semester']);
+if ($has_subject_semester && isset($subject_columns['year_level'])) {
+    $year_levels_to_fetch = [];
+    if ($selected_schedule_mode === '1_3') {
+        $year_levels_to_fetch = [1, 3];
+    } elseif ($selected_schedule_mode === '2_4') {
+        $year_levels_to_fetch = [2, 4];
+    } else {
+        $year_levels_to_fetch = [$selected_year_level];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($year_levels_to_fetch), '?'));
+    $params = array_merge([$program_id, $selected_semester], $year_levels_to_fetch);
+    $subjects = $pdo->prepare("SELECT * FROM subjects WHERE (program_id = ? OR program_id IS NULL) AND (semester = ? OR semester IS NULL) AND (year_level IN ($placeholders) OR year_level IS NULL)");
+    $subjects->execute($params);
+} elseif ($has_subject_semester) {
+    $subjects = $pdo->prepare("SELECT * FROM subjects WHERE (program_id = ? OR program_id IS NULL) AND (semester = ? OR semester IS NULL)");
+    $subjects->execute([$program_id, $selected_semester]);
+} else {
+    $subjects = $pdo->prepare("SELECT * FROM subjects WHERE program_id = ? OR program_id IS NULL");
+    $subjects->execute([$program_id]);
+}
 $subjects = $subjects->fetchAll();
+$subjects = preferProgramSubjects($subjects);
 
 // Subject code -> name map
 $subject_name_map = [];
@@ -55,6 +128,7 @@ $subject_by_code = [];
 foreach ($subjects as $s) {
     $subject_by_code[strtoupper(trim($s['subject_code']))] = $s;
 }
+$available_subject_codes = array_fill_keys(array_keys($subject_by_code), true);
 
 // Instructor -> assigned subject codes
 $instructor_ids = array_map(function ($inst) { return (int)$inst['id']; }, $instructors);
@@ -96,16 +170,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['generate_schedule'])) {
 
         $job_name = $_POST['job_name'] ?? 'Schedule Generation ' . date('Y-m-d H:i:s');
-        $year_level = (int)($_POST['year_level'] ?? 1);
+        $schedule_mode = $_POST['schedule_mode'] ?? 'single';
+
+        $year_levels_to_schedule = [];
+        if ($schedule_mode === '1_3') {
+            $year_levels_to_schedule = [1, 3];
+        } elseif ($schedule_mode === '2_4') {
+            $year_levels_to_schedule = [2, 4];
+        } else {
+            $year_levels_to_schedule = [(int)($_POST['year_level'] ?? 1)];
+        }
+        
         $num_sections = max(1, min(10, (int)($_POST['num_sections'] ?? 1)));
 
         // Saturday control
         $allow_saturday = isset($_POST['allow_saturday']);
+$mirror_mode = $_POST['mirror_mode'] ?? 'strict';
+$four_day_pattern = $mirror_mode !== 'none';
 
         // Filter time slots
         $filtered_time_slots = [];
         foreach ($all_time_slots as $ts) {
-            if (strtolower($ts['day']) === 'saturday' && !$allow_saturday) {
+            $day = strtolower((string)$ts['day']);
+            if ($day === 'saturday' && !$allow_saturday) {
                 continue; // exclude Saturday unless allowed
             }
             $filtered_time_slots[] = $ts;
@@ -113,9 +200,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Prepare GA input
         $input_data = [
-            'year_level' => $year_level,
+            'year_level' => $year_levels_to_schedule,
+            'schedule_mode' => $schedule_mode,
             'num_sections' => $num_sections,
             'program_id' => $program_id,
+            'semester' => $selected_semester,
             'instructors' => [],
             'rooms' => [],
             'subjects' => [],
@@ -125,7 +214,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'preferred_start_time' => $_POST['preferred_start_time'] ?? '08:00',
                 'avoid_back_to_back' => isset($_POST['avoid_back_to_back']),
                 'respect_availability' => isset($_POST['respect_availability']),
-                'allow_saturday' => $allow_saturday
+                'allow_saturday' => $allow_saturday,
+'mirror_mode' => $mirror_mode,
+'four_day_pattern' => $four_day_pattern
             ]
         ];
 
@@ -147,13 +238,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $codes = [];
                 foreach ($raw_codes as $c) {
                     $code = strtoupper(trim((string)$c));
-                    if ($code !== '' && !in_array($code, $codes, true)) {
+                    if ($code !== '' && isset($available_subject_codes[$code]) && !in_array($code, $codes, true)) {
                         $codes[] = $code;
                     }
                 }
                 $input_data['instructor_subject_map'][(string)$inst_id] = $codes;
             } elseif (!empty($instructor_subject_codes[$inst_id])) {
-                $input_data['instructor_subject_map'][(string)$inst_id] = $instructor_subject_codes[$inst_id];
+                $fallback_codes = array_values(array_filter($instructor_subject_codes[$inst_id], function ($code) use ($available_subject_codes) {
+                    return isset($available_subject_codes[strtoupper(trim((string)$code))]);
+                }));
+                $input_data['instructor_subject_map'][(string)$inst_id] = $fallback_codes;
             }
         }
 
@@ -182,7 +276,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if (empty($input_data['subjects'])) {
-            $error = "No subjects selected from instructor assignments. Please select at least one subject under selected instructors.";
+            $error = "No valid subjects found for selected instructor assignments under {$selected_semester}. Please check semester and subject assignments.";
         }
 
         if (empty($error)) {
@@ -272,21 +366,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <div class="form-group">
+        <label>Schedule Mode</label>
+        <select name="schedule_mode" id="schedule_mode_select">
+            <option value="single" selected>Single Year</option>
+            <option value="1_3">1st & 3rd Year</option>
+            <option value="2_4">2nd & 4th Year</option>
+        </select>
+    </div>
+
+    <div class="form-group" id="year_level_group">
         <label>Year Level</label>
-        <select name="year_level">
-            <option value="1">1st Year</option>
-            <option value="2">2nd Year</option>
-            <option value="3">3rd Year</option>
-            <option value="4">4th Year</option>
+        <select name="year_level" id="year_level_select">
+            <option value="1" <?php echo $selected_year_level === 1 ? 'selected' : ''; ?>>1st Year</option>
+            <option value="2" <?php echo $selected_year_level === 2 ? 'selected' : ''; ?>>2nd Year</option>
+            <option value="3" <?php echo $selected_year_level === 3 ? 'selected' : ''; ?>>3rd Year</option>
+            <option value="4" <?php echo $selected_year_level === 4 ? 'selected' : ''; ?>>4th Year</option>
+            <option value="5" <?php echo $selected_year_level === 5 ? 'selected' : ''; ?>>5th Year</option>
         </select>
     </div>
 
     <div class="form-group">
-        <label>Number of Sections</label>
+        <label>Number of Blocks</label>
         <select name="num_sections">
-            <?php for ($i=1;$i<=10;$i++): ?>
-                <option value="<?= $i ?>"><?= $i ?> Section<?= $i>1?'s':'' ?></option>
+            <?php for ($i = 1; $i <= 10; $i++): ?>
+                <?php $last_block = chr(64 + $i); ?>
+                <option value="<?= $i ?>">
+                    <?= $i ?> Block<?= $i > 1 ? 's' : '' ?> (A<?= $i > 1 ? '-' . $last_block : '' ?>)
+                </option>
             <?php endfor; ?>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label>Semester</label>
+        <select name="semester" id="semester_select">
+            <option value="1st Semester" <?php echo $selected_semester === '1st Semester' ? 'selected' : ''; ?>>1st Semester</option>
+            <option value="2nd Semester" <?php echo $selected_semester === '2nd Semester' ? 'selected' : ''; ?>>2nd Semester</option>
+            <option value="Summer" <?php echo $selected_semester === 'Summer' ? 'selected' : ''; ?>>Summer</option>
         </select>
     </div>
 </div>
@@ -308,19 +424,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <strong>Select All Instructors</strong>
         </label>
 
+        <h4 style="margin-top:12px;"><?php echo htmlspecialchars($programChair['program_name']); ?> Instructors</h4>
         <div class="checkbox-grid">
-            <?php foreach ($instructors as $i): ?>
+            <?php foreach ($own_program_instructors as $i): ?>
             <?php
                 $inst_id = (int)$i['id'];
-                $assigned_codes = $instructor_subject_codes[$inst_id] ?? [];
+                $all_assigned_codes = array_values(array_unique(array_map(function ($code) {
+                    return strtoupper(trim((string)$code));
+                }, $instructor_subject_codes[$inst_id] ?? [])));
+                $assigned_codes = array_values(array_filter($all_assigned_codes, function ($code) use ($available_subject_codes) {
+                    return $code !== '' && isset($available_subject_codes[$code]);
+                }));
+                $unavailable_codes = array_values(array_filter($all_assigned_codes, function ($code) use ($available_subject_codes) {
+                    return $code !== '' && !isset($available_subject_codes[$code]);
+                }));
+                $auto_select_instructor = !empty($assigned_codes);
             ?>
             <div class="instructor-card" data-search-text="<?php echo htmlspecialchars(strtolower($i['full_name'] . ' ' . $i['department'])); ?>" style="padding: 10px; border: 1px solid #dee2e6; border-radius: 6px;">
                 <label>
-                    <input type="checkbox" class="instructor-checkbox" name="selected_instructors[]" value="<?= $i['id'] ?>" checked>
+                    <input type="checkbox" class="instructor-checkbox" name="selected_instructors[]" value="<?= $i['id'] ?>" <?php echo $auto_select_instructor ? 'checked' : ''; ?>>
                     <?= htmlspecialchars($i['full_name']) ?> (<?= $i['department'] ?>)
                 </label>
                 <div class="instructor-subject-map" data-instructor-id="<?php echo $inst_id; ?>" style="display:none; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #ced4da;">
-                    <?php if (empty($assigned_codes)): ?>
+                    <?php if (empty($assigned_codes) && empty($unavailable_codes)): ?>
                         <div class="form-hint">No assigned subjects configured for this instructor.</div>
                     <?php else: ?>
                         <?php foreach ($assigned_codes as $code): ?>
@@ -330,11 +456,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <?php echo htmlspecialchars($code . ($label_name ? ' - ' . $label_name : '')); ?>
                             </label>
                         <?php endforeach; ?>
+                        <?php if (!empty($unavailable_codes)): ?>
+                            <div class="form-hint" style="margin-top:6px; color:#6c757d;">
+                                Assigned but unavailable for current semester/program:
+                                <?php echo htmlspecialchars(implode(', ', $unavailable_codes)); ?>
+                            </div>
+                        <?php endif; ?>
                     <?php endif; ?>
                 </div>
             </div>
             <?php endforeach; ?>
         </div>
+
+        <h4 style="margin-top:16px;">Cross Program Instructors</h4>
+        <?php if (empty($cross_program_instructors)): ?>
+            <p class="no-data">No cross program instructors found.</p>
+        <?php else: ?>
+            <div class="checkbox-grid">
+                <?php foreach ($cross_program_instructors as $i): ?>
+                <?php
+                    $inst_id = (int)$i['id'];
+                    $all_assigned_codes = array_values(array_unique(array_map(function ($code) {
+                        return strtoupper(trim((string)$code));
+                    }, $instructor_subject_codes[$inst_id] ?? [])));
+                    $assigned_codes = array_values(array_filter($all_assigned_codes, function ($code) use ($available_subject_codes) {
+                        return $code !== '' && isset($available_subject_codes[$code]);
+                    }));
+                    $unavailable_codes = array_values(array_filter($all_assigned_codes, function ($code) use ($available_subject_codes) {
+                        return $code !== '' && !isset($available_subject_codes[$code]);
+                    }));
+                    $inst_program_label = $i['program_name'] ?: 'All Programs';
+                    $auto_select_instructor = !empty($assigned_codes);
+                ?>
+                <div class="instructor-card" data-search-text="<?php echo htmlspecialchars(strtolower($i['full_name'] . ' ' . $i['department'] . ' ' . $inst_program_label)); ?>" style="padding: 10px; border: 1px solid #dee2e6; border-radius: 6px;">
+                    <label>
+                        <input type="checkbox" class="instructor-checkbox" name="selected_instructors[]" value="<?= $i['id'] ?>" <?php echo $auto_select_instructor ? 'checked' : ''; ?>>
+                        <?= htmlspecialchars($i['full_name']) ?> (<?= htmlspecialchars($i['department']) ?>) - <small><?php echo htmlspecialchars($inst_program_label); ?></small>
+                    </label>
+                    <div class="instructor-subject-map" data-instructor-id="<?php echo $inst_id; ?>" style="display:none; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #ced4da;">
+                        <?php if (empty($assigned_codes) && empty($unavailable_codes)): ?>
+                            <div class="form-hint">No assigned subjects configured for this instructor.</div>
+                        <?php else: ?>
+                            <?php foreach ($assigned_codes as $code): ?>
+                                <?php $label_name = $subject_name_map[$code] ?? ''; ?>
+                                <label style="display:block; margin-bottom: 4px;">
+                                    <input type="checkbox" class="instructor-subject-checkbox" name="instructor_subject_map[<?php echo $inst_id; ?>][]" value="<?php echo htmlspecialchars($code); ?>" checked>
+                                    <?php echo htmlspecialchars($code . ($label_name ? ' - ' . $label_name : '')); ?>
+                                </label>
+                            <?php endforeach; ?>
+                            <?php if (!empty($unavailable_codes)): ?>
+                                <div class="form-hint" style="margin-top:6px; color:#6c757d;">
+                                    Assigned but unavailable for current semester/program:
+                                    <?php echo htmlspecialchars(implode(', ', $unavailable_codes)); ?>
+                                </div>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
     <?php endif; ?>
 </div>
 
@@ -401,6 +582,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             Allow Saturday (Make-up Classes Only)
         </label>
     </div>
+
+    <div class="form-group">
+        <label>Day Pairing (Mon/Thu → Tue/Fri → 1 Wed/subject)</label>
+        <select name="pairing_mode" required>
+            <option value="standard">Standard (Mon/Thu + Tue/Fri + 1 Wed)</option>
+            <option value="mon_wed">Mon/Wed + Tue/Fri + 1 Thu</option>
+            <option value="mon_tue">Mon/Tue + Wed/Fri + 1 Thu</option>
+            <option value="flex_none">No Pairing (Free placement)</option>
+        </select>
+    </div>
 </div>
 
 <div class="form-actions">
@@ -452,7 +643,51 @@ if (instructorSearchInput) {
     });
 }
 
+const semesterSelect = document.getElementById('semester_select');
+if (semesterSelect) {
+    semesterSelect.addEventListener('change', function () {
+        const url = new URL(window.location.href);
+        url.searchParams.set('semester', semesterSelect.value);
+        const yearLevelSelectEl = document.getElementById('year_level_select');
+        if (yearLevelSelectEl) {
+            url.searchParams.set('year_level', yearLevelSelectEl.value);
+        }
+        window.location.href = url.toString();
+    });
+}
+
+const yearLevelSelect = document.getElementById('year_level_select');
+if (yearLevelSelect) {
+    yearLevelSelect.addEventListener('change', function () {
+        const url = new URL(window.location.href);
+        const semesterSelectEl = document.getElementById('semester_select');
+        if (semesterSelectEl) {
+            url.searchParams.set('semester', semesterSelectEl.value);
+        }
+        url.searchParams.set('year_level', yearLevelSelect.value);
+        window.location.href = url.toString();
+    });
+}
+
 syncInstructorSubjectVisibility();
+
+const scheduleModeSelect = document.getElementById('schedule_mode_select');
+const yearLevelGroup = document.getElementById('year_level_group');
+
+if (scheduleModeSelect) {
+    scheduleModeSelect.addEventListener('change', function () {
+        if (this.value === 'single') {
+            yearLevelGroup.style.display = 'block';
+        } else {
+            yearLevelGroup.style.display = 'none';
+        }
+    });
+
+    // Initial check
+    if (scheduleModeSelect.value !== 'single') {
+        yearLevelGroup.style.display = 'none';
+    }
+}
 </script>
 
 </body>

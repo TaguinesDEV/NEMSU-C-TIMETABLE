@@ -21,16 +21,97 @@ try {
     if (strpos($hoursType, 'decimal') === false) {
         $pdo->exec("ALTER TABLE subjects MODIFY hours_per_week DECIMAL(4,2) NOT NULL");
     }
+
+    if (!isset($subjectColumns['lecture_hours'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lecture_hours DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER hours_per_week");
+    }
+    if (!isset($subjectColumns['lab_hours'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_hours DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER lecture_hours");
+    }
+    if (!isset($subjectColumns['semester'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN semester ENUM('1st Semester','2nd Semester','Summer') NOT NULL DEFAULT '1st Semester' AFTER subject_type");
+    } else {
+        $pdo->exec("ALTER TABLE subjects MODIFY COLUMN semester ENUM('1st Semester','2nd Semester','Summer') NOT NULL DEFAULT '1st Semester'");
+    }
+    if (!isset($subjectColumns['program_id'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN program_id INT NULL AFTER department");
+    }
+    if (!isset($subjectColumns['year_level'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN year_level INT NULL AFTER semester");
+    }
+    if (!isset($subjectColumns['prerequisites'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN prerequisites TEXT NULL AFTER year_level");
+    }
 } catch (Exception $e) {
     // Continue page load even if auto-migration is not allowed in this environment.
 }
 
-function hoursFromSubjectType($type) {
-    return strtolower((string)$type) === 'minor' ? '1.50' : '2.50';
+try {
+    $pdo->exec("
+        UPDATE subjects
+        SET semester = '1st Semester'
+        WHERE semester IS NULL OR semester = '' OR semester NOT IN ('1st Semester','2nd Semester','Summer')
+    ");
+} catch (Exception $e) {
+    // Keep the page usable even if legacy cleanup cannot run here.
+}
+
+function defaultHoursFromSubjectType($type) {
+    return strtolower((string)$type) === 'minor' ? 1.50 : 4.25;
+}
+
+function normalizeHoursPerWeek($rawHours, $subjectType) {
+    if ($rawHours === null || $rawHours === '') {
+        return defaultHoursFromSubjectType($subjectType);
+    }
+    $hours = (float)$rawHours;
+    if ($hours <= 0) {
+        return defaultHoursFromSubjectType($subjectType);
+    }
+    return round($hours, 2);
+}
+
+function normalizeNonNegativeHours($rawHours) {
+    $hours = (float)($rawHours ?? 0);
+    if ($hours < 0) {
+        $hours = 0;
+    }
+    return round($hours, 2);
+}
+
+function normalizeSemester($rawSemester) {
+    $semester = trim((string)($rawSemester ?? ''));
+    $allowed = ['1st Semester', '2nd Semester', 'Summer'];
+    return in_array($semester, $allowed, true) ? $semester : '1st Semester';
+}
+
+function normalizeYearLevel($rawYearLevel) {
+    $yearLevel = (int)($rawYearLevel ?? 1);
+    if ($yearLevel < 1 || $yearLevel > 5) {
+        return 1;
+    }
+    return $yearLevel;
+}
+
+function normalizeProgramScope($rawProgramId, $programNameById) {
+    $raw = trim((string)($rawProgramId ?? ''));
+    if ($raw === '' || strtolower($raw) === 'all') {
+        return [null, 'All Programs'];
+    }
+    $programId = (int)$raw;
+    if ($programId <= 0 || !isset($programNameById[$programId])) {
+        return [null, 'All Programs'];
+    }
+    return [$programId, $programNameById[$programId]];
 }
 
 // Fetch departments for dropdown
 $departments = $pdo->query("SELECT * FROM departments ORDER BY dept_name")->fetchAll();
+$programs = $pdo->query("SELECT id, program_name, program_code FROM programs ORDER BY program_name")->fetchAll(PDO::FETCH_ASSOC);
+$programNameById = [];
+foreach ($programs as $programRow) {
+    $programNameById[(int)$programRow['id']] = (string)$programRow['program_name'];
+}
 
 // Handle Add/Edit/Delete operations
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -38,16 +119,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $subject_code = $_POST['subject_code'];
         $subject_name = $_POST['subject_name'];
         $credits = $_POST['credits'];
-        $department = $_POST['department'];
+        [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
+        $semester = normalizeSemester($_POST['semester'] ?? '1st Semester');
+        $year_level = normalizeYearLevel($_POST['year_level'] ?? 1);
+        $prerequisites = trim((string)($_POST['prerequisites'] ?? ''));
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
-        $hours_per_week = hoursFromSubjectType($subject_type);
+        $lecture_hours = normalizeNonNegativeHours($_POST['lecture_hours'] ?? 0);
+        $lab_hours = normalizeNonNegativeHours($_POST['lab_hours'] ?? 0);
+        if ($subject_type === 'major') {
+            $hours_per_week = round($lecture_hours + $lab_hours, 2);
+            if ($hours_per_week <= 0) {
+                $lecture_hours = 2.00;
+                $lab_hours = 2.25;
+                $hours_per_week = 4.25;
+            }
+        } else {
+            $hours_per_week = normalizeHoursPerWeek($_POST['hours_per_week'] ?? null, $subject_type);
+            $lecture_hours = $hours_per_week;
+            $lab_hours = 0.00;
+        }
         
         try {
-            $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, department, subject_type, hours_per_week) VALUES (?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$subject_code, $subject_name, $credits, $department, $subject_type, $hours_per_week]);
+            $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, department, program_id, subject_type, semester, year_level, prerequisites, hours_per_week, lecture_hours, lab_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([$subject_code, $subject_name, $credits, $department, $program_id, $subject_type, $semester, $year_level, $prerequisites, $hours_per_week, $lecture_hours, $lab_hours]);
             $message = "Subject added successfully!";
         } catch (Exception $e) {
             $error = "Error adding subject: " . $e->getMessage();
@@ -59,16 +156,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $subject_code = $_POST['subject_code'];
         $subject_name = $_POST['subject_name'];
         $credits = $_POST['credits'];
-        $department = $_POST['department'];
+        [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
+        $semester = normalizeSemester($_POST['semester'] ?? '1st Semester');
+        $year_level = normalizeYearLevel($_POST['year_level'] ?? 1);
+        $prerequisites = trim((string)($_POST['prerequisites'] ?? ''));
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
-        $hours_per_week = hoursFromSubjectType($subject_type);
+        $lecture_hours = normalizeNonNegativeHours($_POST['lecture_hours'] ?? 0);
+        $lab_hours = normalizeNonNegativeHours($_POST['lab_hours'] ?? 0);
+        if ($subject_type === 'major') {
+            $hours_per_week = round($lecture_hours + $lab_hours, 2);
+            if ($hours_per_week <= 0) {
+                $lecture_hours = 2.00;
+                $lab_hours = 2.25;
+                $hours_per_week = 4.25;
+            }
+        } else {
+            $hours_per_week = normalizeHoursPerWeek($_POST['hours_per_week'] ?? null, $subject_type);
+            $lecture_hours = $hours_per_week;
+            $lab_hours = 0.00;
+        }
         
         try {
-            $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, department = ?, subject_type = ?, hours_per_week = ? WHERE id = ?");
-            $stmt->execute([$subject_code, $subject_name, $credits, $department, $subject_type, $hours_per_week, $id]);
+            $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ? WHERE id = ?");
+            $stmt->execute([$subject_code, $subject_name, $credits, $department, $program_id, $subject_type, $semester, $year_level, $prerequisites, $hours_per_week, $lecture_hours, $lab_hours, $id]);
             $message = "Subject updated successfully!";
         } catch (Exception $e) {
             $error = "Error updating subject: " . $e->getMessage();
@@ -115,10 +228,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Fetch all subjects
 $subjects = $pdo->query("
-    SELECT *,
+    SELECT s.*,
+           p.program_name AS linked_program_name,
+           COALESCE(p.program_name, s.department, 'All Programs') AS program_display_name,
+           COALESCE(NULLIF(s.semester, ''), '1st Semester') AS normalized_semester,
            COALESCE(subject_type, 'major') AS subject_type
-    FROM subjects 
-    ORDER BY department, subject_code
+    FROM subjects s
+    LEFT JOIN programs p ON s.program_id = p.id
+    ORDER BY program_display_name, subject_code
 ")->fetchAll();
 ?>
 <!DOCTYPE html>
@@ -164,25 +281,61 @@ $subjects = $pdo->query("
         }
 
         .btn-icon {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
+            padding: 9px 14px;
+            border: 1px solid transparent;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s, transform 0.2s;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.01em;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease, background-color 0.18s ease;
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         }
         
         .btn-icon:hover {
-            transform: translateY(-2px);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
+            filter: brightness(1.03);
         }
 
-        .btn-edit { background-color: #ffc107; color: #212529; }
-        .btn-edit:hover { background-color: #e0a800; }
-        .btn-delete { background-color: #dc3545; color: #fff; }
-        .btn-delete:hover { background-color: #c82333; }
+        .btn-icon:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        }
+
+        .btn-icon:focus-visible {
+            outline: 3px solid rgba(59, 130, 246, 0.35);
+            outline-offset: 2px;
+        }
+
+        .btn-edit {
+            background: linear-gradient(135deg, #f59e0b, #fbbf24);
+            border-color: #d97706;
+            color: #1f2937;
+        }
+
+        .btn-delete {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+            border-color: #b91c1c;
+            color: #fff;
+        }
+
+        .row-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+        }
+
+        .row-actions form {
+            margin: 0;
+            display: inline-flex;
+        }
 
         .search-toolbar {
             margin: 14px 0 18px;
@@ -272,6 +425,8 @@ $subjects = $pdo->query("
                     <th>Subject Code</th>
                     <th>Subject Name</th>
                     <th>Program</th>
+                    <th>Year</th>
+                    <th>Semester</th>
                     <th>Type</th>
                     <th>Credits</th>
                     <th>Hours/Week</th>
@@ -283,21 +438,26 @@ $subjects = $pdo->query("
                 <tr data-search-text="<?php echo htmlspecialchars(strtolower(
                     $subject['subject_code'] . ' ' .
                     $subject['subject_name'] . ' ' .
-                    $subject['department'] . ' ' .
+                    ($subject['program_display_name'] ?? $subject['department']) . ' ' .
+                    ($subject['semester'] ?? '') . ' ' .
                     $subject['subject_type']
                 )); ?>">
                     <td><?php echo htmlspecialchars($subject['subject_code']); ?></td>
                     <td><?php echo htmlspecialchars($subject['subject_name']); ?></td>
-                    <td><?php echo htmlspecialchars($subject['department']); ?></td>
+                    <td><?php echo htmlspecialchars($subject['program_display_name'] ?? $subject['department']); ?></td>
+                    <td><?php echo htmlspecialchars((string)($subject['year_level'] ?? 1)); ?></td>
+                    <td><?php echo htmlspecialchars($subject['normalized_semester'] ?? '1st Semester'); ?></td>
                     <td><?php echo ucfirst(htmlspecialchars($subject['subject_type'] ?? 'major')); ?></td>
                     <td><?php echo $subject['credits']; ?></td>
                     <td><?php echo number_format((float)$subject['hours_per_week'], 2); ?></td>
                     <td>
-                        <button class="btn-icon btn-edit" onclick="editSubject(<?php echo $subject['id']; ?>)"><i class="fas fa-edit"></i> Edit</button>
-                        <form method="POST" style="display: inline;" onsubmit="return confirm('Are you sure you want to delete this subject?')">
-                            <input type="hidden" name="subject_id" value="<?php echo $subject['id']; ?>">
-                            <button type="submit" name="delete_subject" class="btn-icon btn-delete"><i class="fas fa-trash-alt"></i> Delete</button>
-                        </form>
+                        <div class="row-actions">
+                            <button class="btn-icon btn-edit" onclick="editSubject(<?php echo $subject['id']; ?>)"><i class="fas fa-edit"></i> Edit</button>
+                            <form method="POST" onsubmit="return confirm('Are you sure you want to delete this subject?')">
+                                <input type="hidden" name="subject_id" value="<?php echo $subject['id']; ?>">
+                                <button type="submit" name="delete_subject" class="btn-icon btn-delete"><i class="fas fa-trash-alt"></i> Delete</button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
                 <?php endforeach; ?>
@@ -322,12 +482,12 @@ $subjects = $pdo->query("
                 </div>
                 
                 <div class="form-group">
-                    <label for="department">Program:</label>
-                    <select id="department" name="department" required>
-                        <option value="">Select Program</option>
-                        <?php foreach ($departments as $dept): ?>
-                        <option value="<?php echo htmlspecialchars($dept['dept_name']); ?>">
-                            <?php echo htmlspecialchars($dept['dept_name']); ?> (<?php echo $dept['dept_code']; ?>)
+                    <label for="program_id">Program:</label>
+                    <select id="program_id" name="program_id" required>
+                        <option value="all" selected>All Programs</option>
+                        <?php foreach ($programs as $program): ?>
+                        <option value="<?php echo (int)$program['id']; ?>">
+                            <?php echo htmlspecialchars($program['program_name']); ?> (<?php echo htmlspecialchars($program['program_code']); ?>)
                         </option>
                         <?php endforeach; ?>
                     </select>
@@ -341,14 +501,48 @@ $subjects = $pdo->query("
                 <div class="form-group">
                     <label for="subject_type">Subject Type:</label>
                     <select id="subject_type" name="subject_type" required>
-                        <option value="major" selected>Major (2h 30m)</option>
-                        <option value="minor">Minor (1h 30m)</option>
+                        <option value="major" selected>Major</option>
+                        <option value="minor">Minor</option>
                     </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="semester">Semester:</label>
+                    <select id="semester" name="semester" required>
+                        <option value="1st Semester" selected>1st Semester</option>
+                        <option value="2nd Semester">2nd Semester</option>
+                        <option value="Summer">Summer</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="year_level">Year Level:</label>
+                    <select id="year_level" name="year_level" required>
+                        <option value="1">1st Year</option>
+                        <option value="2">2nd Year</option>
+                        <option value="3">3rd Year</option>
+                        <option value="4">4th Year</option>
+                        <option value="5">5th Year</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="prerequisites">Prerequisites:</label>
+                    <input type="text" id="prerequisites" name="prerequisites" placeholder="Optional prerequisite text">
+                </div>
+
+                <div id="add_major_breakdown">
+                    <div class="form-group">
+                        <label for="lecture_hours">Lecture Hours:</label>
+                        <input type="number" id="lecture_hours" name="lecture_hours" min="0" max="10" step="0.25" value="2.0">
+                    </div>
+                    <div class="form-group">
+                        <label for="lab_hours">Lab Hours:</label>
+                        <input type="number" id="lab_hours" name="lab_hours" min="0" max="10" step="0.25" value="2.25">
+                    </div>
                 </div>
                 
                 <div class="form-group">
                     <label for="hours_per_week">Hours per Week:</label>
-                    <input type="number" id="hours_per_week" name="hours_per_week" min="1" max="10" step="0.5" value="2.5" readonly required>
+                    <input type="number" id="hours_per_week" name="hours_per_week" min="0.5" max="10" step="0.25" value="4.25" required>
                 </div>
                 
                 <button type="submit" name="add_subject" class="btn-primary">Add Subject</button>
@@ -396,11 +590,12 @@ $subjects = $pdo->query("
                 </div>
                 
                 <div class="form-group">
-                    <label for="edit_department">Program:</label>
-                    <select id="edit_department" name="department" required>
-                        <?php foreach ($departments as $dept): ?>
-                        <option value="<?php echo htmlspecialchars($dept['dept_name']); ?>">
-                            <?php echo htmlspecialchars($dept['dept_name']); ?>
+                    <label for="edit_program_id">Program:</label>
+                    <select id="edit_program_id" name="program_id" required>
+                        <option value="all">All Programs</option>
+                        <?php foreach ($programs as $program): ?>
+                        <option value="<?php echo (int)$program['id']; ?>">
+                            <?php echo htmlspecialchars($program['program_name']); ?>
                         </option>
                         <?php endforeach; ?>
                     </select>
@@ -414,14 +609,48 @@ $subjects = $pdo->query("
                 <div class="form-group">
                     <label for="edit_subject_type">Subject Type:</label>
                     <select id="edit_subject_type" name="subject_type" required>
-                        <option value="major">Major (2h 30m)</option>
-                        <option value="minor">Minor (1h 30m)</option>
+                        <option value="major">Major</option>
+                        <option value="minor">Minor</option>
                     </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="edit_semester">Semester:</label>
+                    <select id="edit_semester" name="semester" required>
+                        <option value="1st Semester">1st Semester</option>
+                        <option value="2nd Semester">2nd Semester</option>
+                        <option value="Summer">Summer</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="edit_year_level">Year Level:</label>
+                    <select id="edit_year_level" name="year_level" required>
+                        <option value="1">1st Year</option>
+                        <option value="2">2nd Year</option>
+                        <option value="3">3rd Year</option>
+                        <option value="4">4th Year</option>
+                        <option value="5">5th Year</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="edit_prerequisites">Prerequisites:</label>
+                    <input type="text" id="edit_prerequisites" name="prerequisites">
+                </div>
+
+                <div id="edit_major_breakdown">
+                    <div class="form-group">
+                        <label for="edit_lecture_hours">Lecture Hours:</label>
+                        <input type="number" id="edit_lecture_hours" name="lecture_hours" min="0" max="10" step="0.25" value="2.0">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit_lab_hours">Lab Hours:</label>
+                        <input type="number" id="edit_lab_hours" name="lab_hours" min="0" max="10" step="0.25" value="2.25">
+                    </div>
                 </div>
                 
                 <div class="form-group">
                     <label for="edit_hours_per_week">Hours per Week:</label>
-                    <input type="number" id="edit_hours_per_week" name="hours_per_week" min="1" max="10" step="0.5" readonly required>
+                    <input type="number" id="edit_hours_per_week" name="hours_per_week" min="0.5" max="10" step="0.25" required>
                 </div>
                 
                 <button type="submit" name="edit_subject" class="btn-primary">Update Subject</button>
@@ -431,25 +660,39 @@ $subjects = $pdo->query("
     
     <script>
         function getHoursBySubjectType(typeValue) {
-            return typeValue === 'minor' ? '1.5' : '2.5';
+            return typeValue === 'minor' ? 1.5 : 4.25;
         }
 
-        function syncAddSubjectHours() {
-            const typeEl = document.getElementById('subject_type');
-            const hoursEl = document.getElementById('hours_per_week');
+        function updateMajorBreakdownVisibility(typeEl, breakdownWrap, hoursEl) {
+            if (!typeEl || !breakdownWrap || !hoursEl) {
+                return;
+            }
+            const isMajor = typeEl.value === 'major';
+            breakdownWrap.style.display = isMajor ? 'block' : 'none';
+            hoursEl.readOnly = isMajor;
+        }
+
+        function syncMajorTotal(lectureEl, labEl, hoursEl) {
+            if (!lectureEl || !labEl || !hoursEl) {
+                return;
+            }
+            const lec = parseFloat(lectureEl.value || 0);
+            const lab = parseFloat(labEl.value || 0);
+            const total = (Number.isNaN(lec) ? 0 : lec) + (Number.isNaN(lab) ? 0 : lab);
+            hoursEl.value = total.toFixed(2);
+        }
+
+        function syncHoursDefault(typeEl, hoursEl) {
             if (!typeEl || !hoursEl) {
                 return;
             }
-            hoursEl.value = getHoursBySubjectType(typeEl.value);
-        }
-
-        function syncEditSubjectHours() {
-            const typeEl = document.getElementById('edit_subject_type');
-            const hoursEl = document.getElementById('edit_hours_per_week');
-            if (!typeEl || !hoursEl) {
-                return;
+            const current = parseFloat(hoursEl.value);
+            const prevDefault = getHoursBySubjectType(typeEl.dataset.previousType || 'major');
+            // Auto-adjust only if the user still has the previous default.
+            if (Number.isNaN(current) || Math.abs(current - prevDefault) < 0.001) {
+                hoursEl.value = getHoursBySubjectType(typeEl.value).toFixed(2);
             }
-            hoursEl.value = getHoursBySubjectType(typeEl.value);
+            typeEl.dataset.previousType = typeEl.value;
         }
 
         function openModal(modalId) {
@@ -468,23 +711,88 @@ $subjects = $pdo->query("
                     document.getElementById('edit_subject_id').value = data.id;
                     document.getElementById('edit_subject_code').value = data.subject_code;
                     document.getElementById('edit_subject_name').value = data.subject_name;
-                    document.getElementById('edit_department').value = data.department;
+                    document.getElementById('edit_program_id').value = data.program_id ? String(data.program_id) : 'all';
                     document.getElementById('edit_credits').value = data.credits;
-                    document.getElementById('edit_subject_type').value = (data.subject_type || 'major').toLowerCase();
-                    syncEditSubjectHours();
+                    document.getElementById('edit_semester').value = data.semester || '1st Semester';
+                    document.getElementById('edit_year_level').value = String(data.year_level || 1);
+                    document.getElementById('edit_prerequisites').value = data.prerequisites || '';
+                    const editTypeEl = document.getElementById('edit_subject_type');
+                    const editHoursEl = document.getElementById('edit_hours_per_week');
+                    const editLectureEl = document.getElementById('edit_lecture_hours');
+                    const editLabEl = document.getElementById('edit_lab_hours');
+                    const editBreakdown = document.getElementById('edit_major_breakdown');
+                    editTypeEl.value = (data.subject_type || 'major').toLowerCase();
+                    editTypeEl.dataset.previousType = editTypeEl.value;
+                    editLectureEl.value = Number.parseFloat(data.lecture_hours || 0).toFixed(2);
+                    editLabEl.value = Number.parseFloat(data.lab_hours || 0).toFixed(2);
+                    editHoursEl.value = Number.parseFloat(data.hours_per_week || getHoursBySubjectType(editTypeEl.value)).toFixed(2);
+                    if (editTypeEl.value === 'major' && (parseFloat(editLectureEl.value) > 0 || parseFloat(editLabEl.value) > 0)) {
+                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
+                    }
+                    updateMajorBreakdownVisibility(editTypeEl, editBreakdown, editHoursEl);
                     openModal('editSubjectModal');
                 });
         }
 
         const addSubjectType = document.getElementById('subject_type');
         if (addSubjectType) {
-            addSubjectType.addEventListener('change', syncAddSubjectHours);
-            syncAddSubjectHours();
+            const addHoursEl = document.getElementById('hours_per_week');
+            const addLectureEl = document.getElementById('lecture_hours');
+            const addLabEl = document.getElementById('lab_hours');
+            const addBreakdown = document.getElementById('add_major_breakdown');
+            addSubjectType.dataset.previousType = addSubjectType.value;
+            addSubjectType.addEventListener('change', function () {
+                syncHoursDefault(addSubjectType, addHoursEl);
+                updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
+                if (addSubjectType.value === 'major') {
+                    syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
+                }
+            });
+            if (!addHoursEl.value) {
+                addHoursEl.value = getHoursBySubjectType(addSubjectType.value).toFixed(2);
+            }
+            if (addLectureEl && addLabEl) {
+                addLectureEl.addEventListener('input', function () {
+                    if (addSubjectType.value === 'major') {
+                        syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
+                    }
+                });
+                addLabEl.addEventListener('input', function () {
+                    if (addSubjectType.value === 'major') {
+                        syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
+                    }
+                });
+            }
+            updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
+            syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
         }
 
         const editSubjectType = document.getElementById('edit_subject_type');
         if (editSubjectType) {
-            editSubjectType.addEventListener('change', syncEditSubjectHours);
+            const editHoursEl = document.getElementById('edit_hours_per_week');
+            const editLectureEl = document.getElementById('edit_lecture_hours');
+            const editLabEl = document.getElementById('edit_lab_hours');
+            const editBreakdown = document.getElementById('edit_major_breakdown');
+            editSubjectType.addEventListener('change', function () {
+                syncHoursDefault(editSubjectType, editHoursEl);
+                updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
+                if (editSubjectType.value === 'major') {
+                    syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
+                }
+            });
+            if (editLectureEl && editLabEl) {
+                editLectureEl.addEventListener('input', function () {
+                    if (editSubjectType.value === 'major') {
+                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
+                    }
+                });
+                editLabEl.addEventListener('input', function () {
+                    if (editSubjectType.value === 'major') {
+                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
+                    }
+                });
+            }
+            updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
         }
         
         // Close modals when clicking outside
