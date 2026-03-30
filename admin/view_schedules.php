@@ -8,6 +8,19 @@ $message = '';
 $error = '';
 $conflict_ids = [];
 
+$has_scheduled_minutes = false;
+try {
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours");
+    $has_scheduled_minutes = true;
+} catch (Exception $e) {
+    try {
+        $stmt = $pdo->query("SHOW COLUMNS FROM schedules LIKE 'scheduled_minutes'");
+        $has_scheduled_minutes = (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $inner) {
+        $has_scheduled_minutes = false;
+    }
+}
+
 // Load conflict info from session and then clear it
 if (isset($_SESSION['publish_error'])) {
     $error = $_SESSION['publish_error'];
@@ -29,6 +42,30 @@ if (isset($_GET['error']) && empty($error)) {
 
 // Handle schedule actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['delete_schedule_entry'])) {
+        $schedule_id = (int)($_POST['schedule_id'] ?? 0);
+
+        if ($schedule_id <= 0) {
+            header("Location: view_schedules.php?job_id=$job_id&error=" . urlencode("Invalid schedule entry selected for deletion."));
+            exit();
+        }
+
+        $stmt = $pdo->prepare("SELECT id FROM schedules WHERE id = ? AND job_id = ?");
+        $stmt->execute([$schedule_id, $job_id]);
+        $existing_entry = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$existing_entry) {
+            header("Location: view_schedules.php?job_id=$job_id&error=" . urlencode("Schedule entry not found for this job."));
+            exit();
+        }
+
+        $stmt = $pdo->prepare("DELETE FROM schedules WHERE id = ? AND job_id = ?");
+        $stmt->execute([$schedule_id, $job_id]);
+
+        header("Location: view_schedules.php?job_id=$job_id&message=" . urlencode("Schedule entry deleted successfully. Reports will reflect the change for published schedules."));
+        exit();
+    }
+
     if (isset($_POST['approve_schedule'])) {
         // Block publishing if this job conflicts with already-published schedules from other jobs
         $stmt = $pdo->prepare("
@@ -38,6 +75,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ts.day,
                 ts.start_time,
                 ts.end_time,
+                " . ($has_scheduled_minutes ? "sn.scheduled_minutes" : "NULL") . " AS scheduled_minutes,
                 r1.room_number AS new_room,
                 r2.room_number AS published_room,
                 u1.full_name AS new_instructor,
@@ -68,7 +106,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!empty($publish_conflicts)) {
             $parts = [];
             foreach ($publish_conflicts as $c) {
-                $time_text = date('g:i A', strtotime($c['start_time'])) . '-' . date('g:i A', strtotime($c['end_time']));
+                $minutes = (int)($c['scheduled_minutes'] ?? 0);
+                $endTime = $minutes > 0 ? date('H:i:s', strtotime($c['start_time'] . " +{$minutes} minutes")) : $c['end_time'];
+                $time_text = date('g:i A', strtotime($c['start_time'])) . '-' . date('g:i A', strtotime($endTime));
                 if ($c['conflict_type'] === 'room') {
                     $parts[] = "Room conflict on {$c['day']} {$time_text} ({$c['new_room']})";
                 } else {
@@ -106,11 +146,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         // Create new job
         $stmt = $pdo->prepare("
-            INSERT INTO schedule_jobs (job_name, status, created_by, input_data) 
-            VALUES (?, 'pending', ?, ?)
+            INSERT INTO schedule_jobs (job_name, status, created_by, program_id, input_data) 
+            VALUES (?, 'pending', ?, ?, ?)
         ");
         $new_job_name = $old_job['job_name'] . ' (Regenerated)';
-        $stmt->execute([$new_job_name, $_SESSION['user_id'], $old_job['input_data']]);
+        $stmt->execute([
+            $new_job_name,
+            $_SESSION['user_id'],
+            $old_job['program_id'] ?? null,
+            $old_job['input_data']
+        ]);
         $new_job_id = $pdo->lastInsertId();
         
         // Trigger GA script (same as generate_schedule.php)
@@ -170,13 +215,15 @@ $stmt = $pdo->prepare("
         sub.hours_per_week,
         i.id as instructor_id,
         u.full_name as instructor_name,
+        i.max_hours_per_week,
         i.department as instructor_dept,
         r.room_number,
         r.capacity,
         r.building,
         ts.day,
         ts.start_time,
-        ts.end_time
+        ts.end_time,
+        " . ($has_scheduled_minutes ? "s.scheduled_minutes" : "NULL") . " AS scheduled_minutes
     FROM schedules s
     JOIN subjects sub ON s.subject_id = sub.id
     JOIN instructors i ON s.instructor_id = i.id
@@ -210,6 +257,7 @@ if (!empty($grouped_schedules) && isset($grouped_schedules['Saturday'])) {
 $conflicts = [];
 $time_room_usage = [];
 $time_instructor_usage = [];
+$instructor_overloads = [];
 
 foreach ($schedules as $schedule) {
     // Check room conflicts
@@ -229,7 +277,54 @@ foreach ($schedules as $schedule) {
     } else {
         $time_instructor_usage[$instructor_key] = true;
     }
+
+    $instId = (int)($schedule['instructor_id'] ?? 0);
+    if ($instId > 0) {
+        if (!isset($instructor_overloads[$instId])) {
+            $instructor_overloads[$instId] = [
+                'instructor_name' => (string)($schedule['instructor_name'] ?? ''),
+                'max_hours_per_week' => (float)($schedule['max_hours_per_week'] ?? 0),
+                'total_hours' => 0.0,
+                'subjects' => [],
+            ];
+        }
+
+        $rowHours = (float)($schedule['scheduled_hours'] ?? $schedule['hours_per_week'] ?? 0);
+        $instructor_overloads[$instId]['total_hours'] += $rowHours;
+
+        $subjectKey = (int)($schedule['subject_id'] ?? 0);
+        if ($subjectKey <= 0) {
+            $subjectKey = strtoupper(trim((string)($schedule['subject_code'] ?? '')));
+        }
+        if (!isset($instructor_overloads[$instId]['subjects'][$subjectKey])) {
+            $instructor_overloads[$instId]['subjects'][$subjectKey] = [
+                'subject_code' => (string)($schedule['subject_code'] ?? ''),
+                'subject_name' => (string)($schedule['subject_name'] ?? ''),
+                'hours' => 0.0,
+            ];
+        }
+        $instructor_overloads[$instId]['subjects'][$subjectKey]['hours'] += $rowHours;
+    }
 }
+
+foreach ($instructor_overloads as $instId => &$overloadRow) {
+    $overloadRow['total_hours'] = round((float)$overloadRow['total_hours'], 2);
+    foreach ($overloadRow['subjects'] as &$subjectRow) {
+        $subjectRow['hours'] = round((float)$subjectRow['hours'], 2);
+    }
+    unset($subjectRow);
+    uasort($overloadRow['subjects'], function ($a, $b) {
+        $hoursCompare = (float)($b['hours'] ?? 0) <=> (float)($a['hours'] ?? 0);
+        if ($hoursCompare !== 0) {
+            return $hoursCompare;
+        }
+        return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+    });
+    if ($overloadRow['max_hours_per_week'] <= 0 || $overloadRow['total_hours'] <= $overloadRow['max_hours_per_week']) {
+        unset($instructor_overloads[$instId]);
+    }
+}
+unset($overloadRow);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -310,6 +405,35 @@ foreach ($schedules as $schedule) {
             padding: 10px 20px;
             border-radius: 5px;
             display: inline-block;
+        }
+
+        .schedule-search-panel {
+            margin: 0 0 20px;
+            padding: 14px 16px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+        }
+
+        .schedule-search-panel label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .schedule-search-input {
+            width: 100%;
+            max-width: 420px;
+            padding: 10px 12px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .schedule-search-help {
+            margin-top: 8px;
+            color: #6c757d;
+            font-size: 13px;
         }
         
         .processing-message,
@@ -397,27 +521,69 @@ foreach ($schedules as $schedule) {
         }
         
         .btn-icon {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
+            padding: 9px 14px;
+            border: 1px solid transparent;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s, transform 0.2s;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.01em;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease, background-color 0.18s ease;
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
             text-decoration: none;
             color: white;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         }
         
         .btn-icon:hover {
-            transform: translateY(-2px);
+            transform: translateY(-1px);
+            box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
+            filter: brightness(1.03);
         }
 
-        .btn-edit { background-color: #ffc107; color: #212529; }
-        .btn-edit:hover { background-color: #e0a800; }
-        .btn-publish { background-color: #28a745; color: #fff; }
-        .btn-publish:hover { background-color: #218838; }
+        .btn-icon:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        }
+
+        .btn-icon:focus-visible {
+            outline: 3px solid rgba(59, 130, 246, 0.35);
+            outline-offset: 2px;
+        }
+
+        .btn-edit {
+            background: linear-gradient(135deg, #f59e0b, #fbbf24);
+            border-color: #d97706;
+            color: #1f2937;
+        }
+
+        .btn-delete {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+            border-color: #b91c1c;
+            color: #fff;
+        }
+
+        .btn-publish {
+            background: linear-gradient(135deg, #16a34a, #22c55e);
+            border-color: #15803d;
+            color: #fff;
+        }
+
+        .row-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+        }
+
+        .row-actions form {
+            margin: 0;
+            display: inline-flex;
+        }
 
         @media print {
             .header, .nav-links, .schedule-actions, .btn-logout, 
@@ -648,6 +814,29 @@ foreach ($schedules as $schedule) {
             </div>
         <?php endif; ?>
         
+        <?php if (!empty($instructor_overloads) && $job['status'] == 'completed'): ?>
+            <div class="error">
+                <h3>Instructor Overload Summary</h3>
+                <ul>
+                    <?php foreach ($instructor_overloads as $overloadRow): ?>
+                        <li>
+                            <?php echo htmlspecialchars($overloadRow['instructor_name']); ?>:
+                            <?php echo number_format((float)$overloadRow['total_hours'], 2); ?>h assigned,
+                            limit <?php echo number_format((float)$overloadRow['max_hours_per_week'], 2); ?>h.
+                            Subjects:
+                            <?php
+                                $subjectLabels = [];
+                                foreach ($overloadRow['subjects'] as $subjectRow) {
+                                    $subjectLabels[] = trim(($subjectRow['subject_code'] ?? '') . ' - ' . ($subjectRow['subject_name'] ?? ''), ' -') . ' (' . number_format((float)$subjectRow['hours'], 2) . 'h)';
+                                }
+                                echo htmlspecialchars(implode(', ', $subjectLabels));
+                            ?>
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
+
         <!-- Schedule Display -->
         <?php if ($job['status'] == 'completed'): ?>
             <div class="schedule-view">
@@ -683,6 +872,14 @@ foreach ($schedules as $schedule) {
                     <a href="javascript:window.print()" class="btn-icon"><i class="fas fa-print"></i> Print Schedule</a>
                     <a href="export_schedule.php?job_id=<?php echo $job_id; ?>" class="btn-icon"><i class="fas fa-file-csv"></i> Export CSV</a>
                 </div>
+
+                <?php if (!empty($schedules) && !empty($schedules[0]['is_published'])): ?>
+                    <div class="schedule-search-panel">
+                        <label for="scheduleSearch">Find In Published Schedule</label>
+                        <input type="text" id="scheduleSearch" class="schedule-search-input" placeholder="Search subject, instructor, room, department, section, or day..." autocomplete="off">
+                        <div class="schedule-search-help">Type to quickly find the schedule row you want to review or edit.</div>
+                    </div>
+                <?php endif; ?>
                 
                 <!-- Schedule by Day -->
                 <?php foreach ($day_order as $day): ?>
@@ -709,10 +906,25 @@ foreach ($schedules as $schedule) {
                                     
                                     foreach ($grouped_schedules[$day] as $schedule): 
                                     ?>
-                                    <tr class="<?php echo $schedule['is_published'] ? 'published-row' : ''; ?> <?php echo isset($conflict_ids[$schedule['id']]) ? 'conflict-row' : ''; ?>">
+                                    <tr class="schedule-search-row <?php echo $schedule['is_published'] ? 'published-row' : ''; ?> <?php echo isset($conflict_ids[$schedule['id']]) ? 'conflict-row' : ''; ?>"
+                                        data-search="<?php echo htmlspecialchars(strtolower(implode(' ', [
+                                            (string)$day,
+                                            (string)($schedule['subject_code'] ?? ''),
+                                            (string)($schedule['subject_name'] ?? ''),
+                                            (string)($schedule['instructor_name'] ?? ''),
+                                            (string)($schedule['room_number'] ?? ''),
+                                            (string)($schedule['building'] ?? ''),
+                                            (string)($schedule['department'] ?? ''),
+                                            (string)($schedule['section'] ?? '')
+                                        ]))); ?>">
                                         <td>
+                                            <?php
+                                            $displayEndTime = !empty($schedule['scheduled_minutes'])
+                                                ? date('H:i:s', strtotime($schedule['start_time'] . ' +' . (int)$schedule['scheduled_minutes'] . ' minutes'))
+                                                : $schedule['end_time'];
+                                            ?>
                                             <?php echo date('g:i A', strtotime($schedule['start_time'])); ?> - 
-                                            <?php echo date('g:i A', strtotime($schedule['end_time'])); ?>
+                                            <?php echo date('g:i A', strtotime($displayEndTime)); ?>
                                         </td>
                                         <td>
                                             <strong><?php echo $schedule['subject_code']; ?></strong><br>
@@ -725,11 +937,19 @@ foreach ($schedules as $schedule) {
                                         </td>
                                         <td><?php echo $schedule['department']; ?></td>
                                         <td>
-<a href="#" onclick="loadEditModal(<?php echo $schedule['id']; ?>, '<?php echo $job_id; ?>')" class="btn-icon btn-edit"><i class="fas fa-edit"></i> Edit</a>
-                                            <?php if (!$schedule['is_published']): ?>
-                                            <a href="publish_entry.php?id=<?php echo $schedule['id']; ?>&job_id=<?php echo $job_id; ?>" 
-                                               class="btn-icon btn-publish"><i class="fas fa-check"></i> Publish</a>
-                                            <?php endif; ?>
+                                            <div class="row-actions">
+                                                <a href="#" onclick="loadEditModal(<?php echo $schedule['id']; ?>, '<?php echo $job_id; ?>')" class="btn-icon btn-edit"><i class="fas fa-edit"></i> Edit</a>
+                                                <form method="POST">
+                                                    <input type="hidden" name="schedule_id" value="<?php echo (int)$schedule['id']; ?>">
+                                                    <button type="submit" name="delete_schedule_entry" class="btn-icon btn-delete" onclick="return confirm('Delete this schedule entry? This will also remove it from reports if it is published.');">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                    </button>
+                                                </form>
+                                                <?php if (!$schedule['is_published']): ?>
+                                                <a href="publish_entry.php?id=<?php echo $schedule['id']; ?>&job_id=<?php echo $job_id; ?>" 
+                                                   class="btn-icon btn-publish"><i class="fas fa-check"></i> Publish</a>
+                                                <?php endif; ?>
+                                            </div>
                                         </td>
                                     </tr>
                                     <?php endforeach; ?>
@@ -1108,6 +1328,28 @@ foreach ($schedules as $schedule) {
     
     // Handle form submit via AJAX
     document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.getElementById('scheduleSearch');
+        if (searchInput) {
+            const rows = Array.from(document.querySelectorAll('.schedule-search-row'));
+            const dayBlocks = Array.from(document.querySelectorAll('.day-schedule'));
+            const applyScheduleFilter = () => {
+                const query = searchInput.value.trim().toLowerCase();
+
+                rows.forEach((row) => {
+                    const haystack = row.getAttribute('data-search') || '';
+                    row.style.display = query === '' || haystack.includes(query) ? '' : 'none';
+                });
+
+                dayBlocks.forEach((block) => {
+                    const hasVisibleRows = Array.from(block.querySelectorAll('.schedule-search-row'))
+                        .some((row) => row.style.display !== 'none');
+                    block.style.display = hasVisibleRows ? '' : 'none';
+                });
+            };
+
+            searchInput.addEventListener('input', applyScheduleFilter);
+        }
+
         document.addEventListener('submit', function(e) {
             if (e.target.matches('.edit-form')) {
                 e.preventDefault();

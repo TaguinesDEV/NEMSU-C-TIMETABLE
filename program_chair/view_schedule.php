@@ -30,27 +30,52 @@ $job_id = $_GET['job_id'] ?? 0;
 $message = '';
 $error = '';
 
-// Handle approve action
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['approve_schedule'])) {
-    $stmt = $pdo->prepare("
-        SELECT COUNT(*)
-        FROM schedules sn
-        JOIN schedules sp
-          ON sn.time_slot_id = sp.time_slot_id
-         AND sp.is_published = 1
-         AND sp.job_id <> sn.job_id
-         AND (sn.room_id = sp.room_id OR sn.instructor_id = sp.instructor_id)
-        WHERE sn.job_id = ?
-    ");
-    $stmt->execute([$job_id]);
-    $has_conflict = (int) $stmt->fetchColumn() > 0;
+// Handle approve/delete actions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['delete_schedule_entry'])) {
+        $schedule_id = (int)($_POST['schedule_id'] ?? 0);
 
-    if ($has_conflict) {
-        $error = "Cannot publish this schedule because it conflicts with already published schedules (room or instructor overlap).";
-    } else {
-        $stmt = $pdo->prepare("UPDATE schedules SET is_published = 1 WHERE job_id = ?");
+        if ($schedule_id <= 0) {
+            $error = 'Invalid schedule entry selected for deletion.';
+        } else {
+            $stmt = $pdo->prepare("
+                SELECT s.id
+                FROM schedules s
+                JOIN subjects sub ON s.subject_id = sub.id
+                WHERE s.id = ? AND s.job_id = ? AND sub.program_id = ?
+            ");
+            $stmt->execute([$schedule_id, $job_id, $program_id]);
+            $existing_entry = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$existing_entry) {
+                $error = 'Schedule entry not found for this program.';
+            } else {
+                $stmt = $pdo->prepare("DELETE FROM schedules WHERE id = ? AND job_id = ?");
+                $stmt->execute([$schedule_id, $job_id]);
+                $message = 'Schedule entry deleted successfully. Published reports will reflect the change.';
+            }
+        }
+    } elseif (isset($_POST['approve_schedule'])) {
+        $stmt = $pdo->prepare("
+            SELECT COUNT(*)
+            FROM schedules sn
+            JOIN schedules sp
+              ON sn.time_slot_id = sp.time_slot_id
+             AND sp.is_published = 1
+             AND sp.job_id <> sn.job_id
+             AND (sn.room_id = sp.room_id OR sn.instructor_id = sp.instructor_id)
+            WHERE sn.job_id = ?
+        ");
         $stmt->execute([$job_id]);
-        $message = "Schedule has been approved and published successfully!";
+        $has_conflict = (int) $stmt->fetchColumn() > 0;
+
+        if ($has_conflict) {
+            $error = "Cannot publish this schedule because it conflicts with already published schedules (room or instructor overlap).";
+        } else {
+            $stmt = $pdo->prepare("UPDATE schedules SET is_published = 1 WHERE job_id = ?");
+            $stmt->execute([$job_id]);
+            $message = "Schedule has been approved and published successfully!";
+        }
     }
 }
 
@@ -91,6 +116,7 @@ $stmt = $pdo->prepare("
         sub.subject_name,
         i.id as instructor_id,
         u.full_name as instructor_name,
+        i.max_hours_per_week,
         r.room_number,
         r.building,
         ts.day,
@@ -123,6 +149,57 @@ $day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 if (isset($grouped['Saturday'])) {
     $day_order[] = 'Saturday';
 }
+
+$instructor_overloads = [];
+foreach ($schedules as $schedule) {
+    $instId = (int)($schedule['instructor_id'] ?? 0);
+    if ($instId <= 0) {
+        continue;
+    }
+    if (!isset($instructor_overloads[$instId])) {
+        $instructor_overloads[$instId] = [
+            'instructor_name' => (string)($schedule['instructor_name'] ?? ''),
+            'max_hours_per_week' => (float)($schedule['max_hours_per_week'] ?? 0),
+            'total_hours' => 0.0,
+            'subjects' => [],
+        ];
+    }
+
+    $rowHours = (float)($schedule['scheduled_hours'] ?? $schedule['hours_per_week'] ?? 0);
+    $instructor_overloads[$instId]['total_hours'] += $rowHours;
+
+    $subjectKey = (int)($schedule['subject_id'] ?? 0);
+    if ($subjectKey <= 0) {
+        $subjectKey = strtoupper(trim((string)($schedule['subject_code'] ?? '')));
+    }
+    if (!isset($instructor_overloads[$instId]['subjects'][$subjectKey])) {
+        $instructor_overloads[$instId]['subjects'][$subjectKey] = [
+            'subject_code' => (string)($schedule['subject_code'] ?? ''),
+            'subject_name' => (string)($schedule['subject_name'] ?? ''),
+            'hours' => 0.0,
+        ];
+    }
+    $instructor_overloads[$instId]['subjects'][$subjectKey]['hours'] += $rowHours;
+}
+
+foreach ($instructor_overloads as $instId => &$overloadRow) {
+    $overloadRow['total_hours'] = round((float)$overloadRow['total_hours'], 2);
+    foreach ($overloadRow['subjects'] as &$subjectRow) {
+        $subjectRow['hours'] = round((float)$subjectRow['hours'], 2);
+    }
+    unset($subjectRow);
+    uasort($overloadRow['subjects'], function ($a, $b) {
+        $hoursCompare = (float)($b['hours'] ?? 0) <=> (float)($a['hours'] ?? 0);
+        if ($hoursCompare !== 0) {
+            return $hoursCompare;
+        }
+        return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+    });
+    if ($overloadRow['max_hours_per_week'] <= 0 || $overloadRow['total_hours'] <= $overloadRow['max_hours_per_week']) {
+        unset($instructor_overloads[$instId]);
+    }
+}
+unset($overloadRow);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -173,6 +250,35 @@ if (isset($grouped['Saturday'])) {
             border-radius: 5px;
             display: inline-block;
         }
+
+        .schedule-search-panel {
+            margin: 0 0 20px;
+            padding: 14px 16px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+        }
+
+        .schedule-search-panel label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .schedule-search-input {
+            width: 100%;
+            max-width: 420px;
+            padding: 10px 12px;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .schedule-search-help {
+            margin-top: 8px;
+            color: #6c757d;
+            font-size: 13px;
+        }
         
         .schedule-actions {
             margin: 20px 0;
@@ -213,20 +319,69 @@ if (isset($grouped['Saturday'])) {
         }
         
         .btn-icon {
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
+            padding: 9px 14px;
+            border: 1px solid transparent;
+            border-radius: 8px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            letter-spacing: 0.01em;
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
             text-decoration: none;
             color: white;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease, background-color 0.18s ease;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
         }
-        
-        .btn-publish { background-color: #28a745; }
-        .btn-publish:hover { background-color: #218838; }
+
+        .btn-icon:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
+            filter: brightness(1.03);
+        }
+
+        .btn-icon:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12);
+        }
+
+        .btn-icon:focus-visible {
+            outline: 3px solid rgba(59, 130, 246, 0.35);
+            outline-offset: 2px;
+        }
+
+        .btn-edit {
+            background: linear-gradient(135deg, #f59e0b, #fbbf24);
+            border-color: #d97706;
+            color: #1f2937;
+        }
+
+        .btn-delete {
+            background: linear-gradient(135deg, #dc2626, #ef4444);
+            border-color: #b91c1c;
+            color: #fff;
+        }
+
+        .btn-publish {
+            background: linear-gradient(135deg, #16a34a, #22c55e);
+            border-color: #15803d;
+            color: #fff;
+        }
+
+        .row-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+        }
+
+        .row-actions form {
+            margin: 0;
+            display: inline-flex;
+        }
     </style>
 </head>
 <body>
@@ -277,6 +432,29 @@ if (isset($grouped['Saturday'])) {
         
         <?php if ($job['status'] == 'completed'): ?>
             <div class="schedule-view">
+                <?php if (!empty($instructor_overloads)): ?>
+                    <div class="error" style="margin-bottom: 16px;">
+                        <strong>Instructor Overload Summary:</strong>
+                        <ul style="margin-top: 8px;">
+                            <?php foreach ($instructor_overloads as $overloadRow): ?>
+                                <li>
+                                    <?php echo htmlspecialchars($overloadRow['instructor_name']); ?>:
+                                    <?php echo number_format((float)$overloadRow['total_hours'], 2); ?>h assigned,
+                                    limit <?php echo number_format((float)$overloadRow['max_hours_per_week'], 2); ?>h.
+                                    Subjects:
+                                    <?php
+                                        $subjectLabels = [];
+                                        foreach ($overloadRow['subjects'] as $subjectRow) {
+                                            $subjectLabels[] = trim(($subjectRow['subject_code'] ?? '') . ' - ' . ($subjectRow['subject_name'] ?? ''), ' -') . ' (' . number_format((float)$subjectRow['hours'], 2) . 'h)';
+                                        }
+                                        echo htmlspecialchars(implode(', ', $subjectLabels));
+                                    ?>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                    </div>
+                <?php endif; ?>
+
                 <!-- Actions -->
                 <div class="schedule-actions">
                     <?php if (!empty($schedules) && !$schedules[0]['is_published']): ?>
@@ -292,6 +470,14 @@ if (isset($grouped['Saturday'])) {
                         </div>
                     <?php endif; ?>
                 </div>
+
+                <?php if (!empty($schedules) && !empty($schedules[0]['is_published'])): ?>
+                    <div class="schedule-search-panel">
+                        <label for="scheduleSearch">Find In Published Schedule</label>
+                        <input type="text" id="scheduleSearch" class="schedule-search-input" placeholder="Search subject, instructor, room, building, or day..." autocomplete="off">
+                        <div class="schedule-search-help">Type to quickly jump to the row you want to review.</div>
+                    </div>
+                <?php endif; ?>
                 
                 <!-- Schedule by Day -->
                 <?php foreach ($day_order as $day): ?>
@@ -305,6 +491,7 @@ if (isset($grouped['Saturday'])) {
                                         <th>Subject</th>
                                         <th>Instructor</th>
                                         <th>Room</th>
+                                        <th>Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -315,7 +502,15 @@ if (isset($grouped['Saturday'])) {
                                     
                                     foreach ($grouped[$day] as $s): 
                                     ?>
-                                    <tr class="<?php echo $s['is_published'] ? 'published-row' : ''; ?>">
+                                    <tr class="schedule-search-row <?php echo $s['is_published'] ? 'published-row' : ''; ?>"
+                                        data-search="<?php echo htmlspecialchars(strtolower(implode(' ', [
+                                            (string)$day,
+                                            (string)($s['subject_code'] ?? ''),
+                                            (string)($s['subject_name'] ?? ''),
+                                            (string)($s['instructor_name'] ?? ''),
+                                            (string)($s['room_number'] ?? ''),
+                                            (string)($s['building'] ?? '')
+                                        ]))); ?>">
                                         <td>
                                             <?php echo date('g:i A', strtotime($s['start_time'])); ?> - 
                                             <?php echo date('g:i A', strtotime($s['end_time'])); ?>
@@ -326,6 +521,16 @@ if (isset($grouped['Saturday'])) {
                                         </td>
                                         <td><?php echo $s['instructor_name']; ?></td>
                                         <td><?php echo $s['room_number']; ?> (<?php echo $s['building']; ?>)</td>
+                                        <td>
+                                            <div class="row-actions">
+                                                <form method="POST">
+                                                    <input type="hidden" name="schedule_id" value="<?php echo (int)$s['id']; ?>">
+                                                    <button type="submit" name="delete_schedule_entry" class="btn-icon btn-delete" onclick="return confirm('Delete this schedule entry? This will also remove it from published reports.');">
+                                                        <i class="fas fa-trash"></i> Delete
+                                                    </button>
+                                                </form>
+                                            </div>
+                                        </td>
                                     </tr>
                                     <?php endforeach; ?>
                                 </tbody>
@@ -409,5 +614,33 @@ if (isset($grouped['Saturday'])) {
         }, 5000);
     </script>
     <?php endif; ?>
+    <script>
+        (function () {
+            const searchInput = document.getElementById('scheduleSearch');
+            if (!searchInput) {
+                return;
+            }
+
+            const rows = Array.from(document.querySelectorAll('.schedule-search-row'));
+            const dayBlocks = Array.from(document.querySelectorAll('.day-schedule'));
+
+            const applyScheduleFilter = () => {
+                const query = searchInput.value.trim().toLowerCase();
+
+                rows.forEach((row) => {
+                    const haystack = row.getAttribute('data-search') || '';
+                    row.style.display = query === '' || haystack.includes(query) ? '' : 'none';
+                });
+
+                dayBlocks.forEach((block) => {
+                    const hasVisibleRows = Array.from(block.querySelectorAll('.schedule-search-row'))
+                        .some((row) => row.style.display !== 'none');
+                    block.style.display = hasVisibleRows ? '' : 'none';
+                });
+            };
+
+            searchInput.addEventListener('input', applyScheduleFilter);
+        })();
+    </script>
 </body>
 </html>

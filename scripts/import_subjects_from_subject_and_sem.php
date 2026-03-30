@@ -16,19 +16,32 @@ $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
 function ensurePrograms(PDO $pdo): array
 {
+    $pdo->exec("
+        INSERT INTO departments (dept_name, dept_code)
+        VALUES ('Department of Computer Studies', 'DCS')
+        ON DUPLICATE KEY UPDATE dept_name = VALUES(dept_name)
+    ");
+
+    $departmentId = (int)$pdo->query("SELECT id FROM departments WHERE dept_code = 'DCS' LIMIT 1")->fetchColumn();
+    if ($departmentId <= 0) {
+        throw new RuntimeException('Unable to resolve DCS department.');
+    }
+
     $programs = [
-        'CS' => ['Bachelor of Science in Computer Science', 'BSCS'],
-        'IT' => ['Bachelor of Science in Information Technology', 'BSIT'],
-        'CPE' => ['Bachelor of Science in Computer Engineering', 'BSCPE'],
+        ['Computer Science', 'CS'],
+        ['Information Technology', 'IT'],
+        ['Computer Engineering', 'CPE'],
     ];
 
     $stmt = $pdo->prepare("
-        INSERT INTO programs (program_name, program_code)
-        VALUES (?, ?)
-        ON DUPLICATE KEY UPDATE program_name = VALUES(program_name)
+        INSERT INTO programs (program_name, program_code, department_id)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            program_name = VALUES(program_name),
+            department_id = VALUES(department_id)
     ");
     foreach ($programs as [$name, $code]) {
-        $stmt->execute([$name, $code]);
+        $stmt->execute([$name, $code, $departmentId]);
     }
 
     $programIdByCode = [];
@@ -66,6 +79,15 @@ function ensureSubjectSchema(PDO $pdo): void
     }
     if (!isset($columns['lab_hours'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_hours DECIMAL(6,2) NOT NULL DEFAULT 0.00 AFTER lecture_hours");
+    }
+    if (!isset($columns['meetings_per_week'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN meetings_per_week TINYINT NOT NULL DEFAULT 2 AFTER lab_hours");
+    }
+    if (!isset($columns['lecture_minutes_per_meeting'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lecture_minutes_per_meeting INT NOT NULL DEFAULT 0 AFTER meetings_per_week");
+    }
+    if (!isset($columns['lab_minutes_per_meeting'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_minutes_per_meeting INT NOT NULL DEFAULT 0 AFTER lecture_minutes_per_meeting");
     }
 
     $pdo->exec("ALTER TABLE subjects MODIFY hours_per_week DECIMAL(6,2) NOT NULL");
@@ -128,7 +150,7 @@ function loadIntoTempTable(PDO $pdo, string $sourceFile): void
             semester VARCHAR(30) NOT NULL,
             year_level INT NOT NULL,
             prerequisites TEXT NULL,
-            department VARCHAR(20) NOT NULL
+            program VARCHAR(100) NOT NULL
         )
     ");
 
@@ -172,9 +194,63 @@ function detectSubjectType(string $code): string
     return 'minor';
 }
 
-function buildDepartmentLabel(string $departmentCode): string
+function resolveProgramCode(string $programLabel): string
 {
-    return strtoupper(trim($departmentCode));
+    $normalized = strtolower(trim($programLabel));
+    if ($normalized === 'computer science' || $normalized === 'cs') {
+        return 'CS';
+    }
+    if ($normalized === 'information technology' || $normalized === 'it') {
+        return 'IT';
+    }
+    if ($normalized === 'computer engineering' || $normalized === 'cpe') {
+        return 'CPE';
+    }
+    return '';
+}
+
+function buildDepartmentLabel(string $programLabel): string
+{
+    $programCode = resolveProgramCode($programLabel);
+    if ($programCode === 'CS') {
+        return 'Computer Science';
+    }
+    if ($programCode === 'IT') {
+        return 'Information Technology';
+    }
+    if ($programCode === 'CPE') {
+        return 'Computer Engineering';
+    }
+    return trim($programLabel);
+}
+
+function determineMeetingDefaults(float $lectureHours, float $labHours, string $subjectType): array
+{
+    $meetingsPerWeek = 2;
+    $lectureMinutes = 0;
+    $labMinutes = 0;
+
+    if ($subjectType === 'minor') {
+        $lectureMinutes = (int) round(($lectureHours + $labHours) * 60 / $meetingsPerWeek);
+        return [$meetingsPerWeek, $lectureMinutes, 0];
+    }
+
+    if (abs($lectureHours - 2.0) < 0.01 && abs($labHours - 3.0) < 0.01) {
+        return [$meetingsPerWeek, 120, 145];
+    }
+
+    if ($lectureHours > 0) {
+        $lectureMinutes = (int) round(($lectureHours * 60) / $meetingsPerWeek);
+    }
+    if ($labHours > 0) {
+        $labMinutes = (int) round(($labHours * 60) / $meetingsPerWeek);
+    }
+
+    if ($lectureMinutes <= 0 && $labMinutes <= 0) {
+        $lectureMinutes = $subjectType === 'minor' ? 90 : 120;
+    }
+
+    return [$meetingsPerWeek, $lectureMinutes, $labMinutes];
 }
 
 try {
@@ -198,8 +274,11 @@ try {
             prerequisites,
             hours_per_week,
             lecture_hours,
-            lab_hours
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            lab_hours,
+            meetings_per_week,
+            lecture_minutes_per_meeting,
+            lab_minutes_per_meeting
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             subject_name = VALUES(subject_name),
             credits = VALUES(credits),
@@ -211,31 +290,31 @@ try {
             prerequisites = VALUES(prerequisites),
             hours_per_week = VALUES(hours_per_week),
             lecture_hours = VALUES(lecture_hours),
-            lab_hours = VALUES(lab_hours)
+            lab_hours = VALUES(lab_hours),
+            meetings_per_week = VALUES(meetings_per_week),
+            lecture_minutes_per_meeting = VALUES(lecture_minutes_per_meeting),
+            lab_minutes_per_meeting = VALUES(lab_minutes_per_meeting)
     ");
 
     $rows = $pdo->query("
-        SELECT course_code, subject_name, lec_hours, lab_hours, units, semester, year_level, prerequisites, department
+        SELECT course_code, subject_name, lec_hours, lab_hours, units, semester, year_level, prerequisites, program
         FROM temp_curriculum_subjects
         ORDER BY id
     ")->fetchAll(PDO::FETCH_ASSOC);
 
     $inserted = 0;
     foreach ($rows as $row) {
-        $departmentCode = strtoupper(trim((string)$row['department']));
-        if (!isset($programIdByCode[$departmentCode === 'CPE' ? 'BSCPE' : 'BS' . $departmentCode])) {
-            if ($departmentCode === 'CS' && isset($programIdByCode['BSCS'])) {
-                $programId = $programIdByCode['BSCS'];
-            } elseif ($departmentCode === 'IT' && isset($programIdByCode['BSIT'])) {
-                $programId = $programIdByCode['BSIT'];
-            } elseif ($departmentCode === 'CPE' && isset($programIdByCode['BSCPE'])) {
-                $programId = $programIdByCode['BSCPE'];
-            } else {
-                continue;
-            }
-        } else {
-            $programId = $programIdByCode[$departmentCode === 'CPE' ? 'BSCPE' : 'BS' . $departmentCode];
+        $programLabel = trim((string)$row['program']);
+        $departmentCode = resolveProgramCode($programLabel);
+        if ($departmentCode === '') {
+            continue;
         }
+
+        $programLookupCode = $departmentCode;
+        if (!isset($programIdByCode[$programLookupCode])) {
+            continue;
+        }
+        $programId = $programIdByCode[$programLookupCode];
 
         $subjectCode = trim((string)$row['course_code']);
         $subjectName = trim((string)$row['subject_name']);
@@ -247,7 +326,8 @@ try {
         $yearLevel = (int)$row['year_level'];
         $prerequisites = trim((string)($row['prerequisites'] ?? ''));
         $subjectType = detectSubjectType($subjectCode);
-        $department = buildDepartmentLabel($departmentCode);
+        $department = buildDepartmentLabel($programLabel);
+        [$meetingsPerWeek, $lectureMinutes, $labMinutes] = determineMeetingDefaults($lectureHours, $labHours, $subjectType);
 
         $upsert->execute([
             $subjectCode,
@@ -262,6 +342,9 @@ try {
             $hoursPerWeek,
             $lectureHours,
             $labHours,
+            $meetingsPerWeek,
+            $lectureMinutes,
+            $labMinutes,
         ]);
         $inserted++;
     }

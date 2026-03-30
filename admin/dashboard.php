@@ -124,8 +124,8 @@ $stats = [
                 
                 <a href="manage_programs.php" class="menu-card">
                     <div class="menu-icon">🎓</div>
-                    <h3>Programs</h3>
-                    <p>Manage academic programs</p>
+                    <h3>Departments</h3>
+                    <p>Manage departments and the programs under them</p>
                 </a>
                 
                 <a href="manage_program_chairs.php" class="menu-card">

@@ -40,8 +40,12 @@ $count = 0;
 foreach ($days as $day) {
     foreach ($slot_templates[$type] as $slot) {
         try {
-            $stmt = $pdo->prepare("INSERT IGNORE INTO time_slots (day, start_time, end_time) VALUES (?, ?, ?)");
-            $stmt->execute([$day, $slot[0], $slot[1]]);
+            $slot_type = ($day !== 'Saturday' && $slot[0] === '11:30' && $slot[1] === '13:00') ? 'lunch' : 'regular';
+            if ($day === 'Saturday') {
+                $slot_type = 'makeup';
+            }
+            $stmt = $pdo->prepare("INSERT IGNORE INTO time_slots (day, start_time, end_time, slot_type) VALUES (?, ?, ?, ?)");
+            $stmt->execute([$day, $slot[0], $slot[1], $slot_type]);
             $count += $stmt->rowCount();
         } catch (Exception $e) {
             // Skip duplicates

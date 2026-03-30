@@ -1,6 +1,55 @@
 <?php
 require_once __DIR__ . '/../config/database.php';
 
+function getAppBasePath() {
+    static $basePath = null;
+    if ($basePath !== null) {
+        return $basePath;
+    }
+
+    $documentRoot = realpath($_SERVER['DOCUMENT_ROOT'] ?? '');
+    $appRoot = realpath(__DIR__ . '/..');
+
+    if ($documentRoot && $appRoot) {
+        $normalizedDocumentRoot = str_replace('\\', '/', $documentRoot);
+        $normalizedAppRoot = str_replace('\\', '/', $appRoot);
+
+        if (strpos($normalizedAppRoot, $normalizedDocumentRoot) === 0) {
+            $basePath = substr($normalizedAppRoot, strlen($normalizedDocumentRoot));
+            $basePath = '/' . trim((string) $basePath, '/');
+            if ($basePath === '//') {
+                $basePath = '';
+            }
+            return $basePath;
+        }
+    }
+
+    $scriptName = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '');
+    $scriptDir = trim((string) dirname($scriptName), '/');
+    if ($scriptDir === '' || $scriptDir === '.') {
+        $basePath = '';
+    } else {
+        $segments = explode('/', $scriptDir);
+        $basePath = '/' . $segments[0];
+    }
+
+    return $basePath;
+}
+
+function buildAppUrl($path = '') {
+    $basePath = getAppBasePath();
+    $normalizedPath = '/' . ltrim((string) $path, '/');
+    if ($normalizedPath === '/') {
+        return $basePath !== '' ? $basePath . '/' : '/';
+    }
+    return ($basePath !== '' ? $basePath : '') . $normalizedPath;
+}
+
+function redirectToApp($path) {
+    header('Location: ' . buildAppUrl($path));
+    exit();
+}
+
 function isLoggedIn() {
     return isset($_SESSION['user_id']);
 }
@@ -19,24 +68,27 @@ function isProgramChair() {
 
 function requireLogin() {
     if (!isLoggedIn()) {
-        header('Location: /index.php');
-        exit();
+        redirectToApp('index.php');
     }
 }
 
 function requireAdmin() {
     requireLogin();
     if (!isAdmin()) {
-        header('Location: /instructor/dashboard.php');
-        exit();
+        if (isProgramChair()) {
+            redirectToApp('program_chair/dashboard.php');
+        }
+        redirectToApp('instructor/dashboard.php');
     }
 }
 
 function requireProgramChair() {
     requireLogin();
     if (!isProgramChair()) {
-        header('Location: /index.php');
-        exit();
+        if (isAdmin()) {
+            redirectToApp('admin/dashboard.php');
+        }
+        redirectToApp('index.php');
     }
 }
 
@@ -80,7 +132,6 @@ function logout() {
     session_destroy();
     
     // Redirect to login page
-    header('Location: index.php');
-    exit();
+    redirectToApp('index.php');
 }
 ?>

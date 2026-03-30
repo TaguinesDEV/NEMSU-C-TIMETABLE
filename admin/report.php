@@ -57,6 +57,59 @@ $report_logo_dir = __DIR__ . '/../assets/report_logos';
 $report_logo_web_path = '../assets/report_logos';
 $signatories = $signatory_defaults;
 
+$renderReportFooter = static function (array $signatories): void {
+    ?>
+    <div class="report-signature-sheet">
+        <div class="report-signature-grid">
+            <div>
+                <div class="signature-label"><?php echo htmlspecialchars($signatories['prepared_by_label']); ?></div>
+                <div class="signature-name"><?php echo htmlspecialchars($signatories['prepared_by_name']); ?></div>
+                <div class="signature-title"><?php echo htmlspecialchars($signatories['prepared_by_title']); ?></div>
+            </div>
+            <div>
+                <div class="signature-label"><?php echo htmlspecialchars($signatories['recommending_label']); ?></div>
+                <div class="signature-name"><?php echo htmlspecialchars($signatories['recommending_name']); ?></div>
+                <div class="signature-title"><?php echo htmlspecialchars($signatories['recommending_title']); ?></div>
+            </div>
+        </div>
+
+        <div class="report-signature-grid single">
+            <div>
+                <div class="signature-label"><?php echo htmlspecialchars($signatories['noted_by_label']); ?></div>
+                <div class="signature-name"><?php echo htmlspecialchars($signatories['noted_by_name']); ?></div>
+                <div class="signature-title"><?php echo htmlspecialchars($signatories['noted_by_title']); ?></div>
+            </div>
+        </div>
+
+        <div class="report-signature-grid single">
+            <div>
+                <div class="signature-label"><?php echo htmlspecialchars($signatories['approved_by_label']); ?></div>
+                <div class="signature-name"><?php echo htmlspecialchars($signatories['approved_by_name']); ?></div>
+                <div class="signature-title"><?php echo htmlspecialchars($signatories['approved_by_title']); ?></div>
+            </div>
+        </div>
+
+        <div class="report-signature-meta"><?php echo htmlspecialchars($signatories['document_code']); ?></div>
+
+        <div class="report-contact-footer">
+            <div class="report-contact-lines">
+                <div><?php echo htmlspecialchars($signatories['contact_address']); ?></div>
+                <div><?php echo htmlspecialchars($signatories['contact_phone']); ?></div>
+                <div><a href="https://<?php echo htmlspecialchars($signatories['contact_website']); ?>" target="_blank"><?php echo htmlspecialchars($signatories['contact_website']); ?></a></div>
+            </div>
+            <div class="report-contact-logos">
+                <?php foreach (['footer_logo_1', 'footer_logo_2', 'footer_logo_3'] as $logo_key): ?>
+                    <?php $logo_src = trim((string) ($signatories[$logo_key] ?? '')); ?>
+                    <?php if ($logo_src !== ''): ?>
+                        <img src="<?php echo htmlspecialchars($logo_src); ?>" alt="Footer logo">
+                    <?php endif; ?>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+    <?php
+};
+
 $formatResearchExtensionType = static function ($value): string {
     $normalized = strtolower(trim((string) $value));
     if ($normalized === 'both') {
@@ -156,9 +209,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_report_signatori
 }
 
 // Handle filters
-$department = $_GET['department'] ?? '';
+$department_lookup = trim((string)($_GET['department'] ?? ''));
+$program_lookup = trim((string)($_GET['program'] ?? ''));
 $year_level = $_GET['year_level'] ?? '';
-$instructor_id = $_GET['instructor_id'] ?? '';
+$instructor_lookup = trim((string)($_GET['instructor'] ?? ''));
+
+$departments = $pdo->query("
+    SELECT d.id, d.dept_name, d.dept_code
+    FROM departments d
+    ORDER BY d.dept_name
+")->fetchAll(PDO::FETCH_ASSOC);
+$programs = $pdo->query("
+    SELECT p.id, p.program_name, p.program_code, p.department_id, d.dept_name, d.dept_code
+    FROM programs p
+    LEFT JOIN departments d ON p.department_id = d.id
+    ORDER BY d.dept_name, p.program_name
+")->fetchAll(PDO::FETCH_ASSOC);
+$instructors = $pdo->query("
+    SELECT i.id, u.full_name 
+    FROM instructors i 
+    JOIN users u ON i.user_id = u.id
+    ORDER BY u.full_name
+")->fetchAll(PDO::FETCH_ASSOC);
+
+$departmentIdByLookup = [];
+foreach ($departments as $deptRow) {
+    $departmentIdByLookup[strtoupper($deptRow['dept_name'])] = (int)$deptRow['id'];
+    $departmentIdByLookup[strtoupper($deptRow['dept_code'])] = (int)$deptRow['id'];
+    $departmentIdByLookup[strtoupper($deptRow['dept_name'] . ' (' . $deptRow['dept_code'] . ')')] = (int)$deptRow['id'];
+}
+
+$programIdByLookup = [];
+foreach ($programs as $programRow) {
+    $programIdByLookup[strtoupper($programRow['program_name'])] = (int)$programRow['id'];
+    $programIdByLookup[strtoupper($programRow['program_code'])] = (int)$programRow['id'];
+    $programIdByLookup[strtoupper($programRow['program_name'] . ' (' . $programRow['program_code'] . ')')] = (int)$programRow['id'];
+}
+
+$instructorIdByLookup = [];
+foreach ($instructors as $instructorRow) {
+    $instructorIdByLookup[strtoupper($instructorRow['full_name'])] = (int)$instructorRow['id'];
+}
+
+$department_id = (int)($departmentIdByLookup[strtoupper($department_lookup)] ?? 0);
+$program_id = (int)($programIdByLookup[strtoupper($program_lookup)] ?? 0);
+$instructor_id = (int)($instructorIdByLookup[strtoupper($instructor_lookup)] ?? 0);
 
 // Build query (include subject credits/hours for report format)
 $query = "
@@ -167,9 +262,13 @@ $query = "
            COALESCE(s.scheduled_hours, sub.hours_per_week) AS scheduled_hours,
            i.id as instructor_id, u.full_name as instructor_name,
            r.room_number, r.capacity AS room_capacity, r.has_computers, ts.day, ts.start_time, ts.end_time,
+           p.id AS program_id, p.program_name, p.program_code,
+           d.id AS resolved_department_id, d.dept_name, d.dept_code,
            j.job_name, j.input_data
     FROM schedules s
     JOIN subjects sub ON s.subject_id = sub.id
+    LEFT JOIN programs p ON sub.program_id = p.id
+    LEFT JOIN departments d ON p.department_id = d.id
     JOIN instructors i ON s.instructor_id = i.id
     JOIN users u ON i.user_id = u.id
     JOIN rooms r ON s.room_id = r.id
@@ -180,9 +279,14 @@ $query = "
 
 $params = [];
 
-if ($department) {
-    $query .= " AND s.department = ?";
-    $params[] = $department;
+if ($department_id > 0) {
+    $query .= " AND d.id = ?";
+    $params[] = $department_id;
+}
+
+if ($program_id > 0) {
+    $query .= " AND p.id = ?";
+    $params[] = $program_id;
 }
 
 if ($year_level) {
@@ -217,12 +321,6 @@ $day_short = [
     'Saturday' => 'Sat'
 ];
 
-$format_block_label = static function ($yearLevel, $section): string {
-    $year = (int) $yearLevel;
-    $block = strtoupper(trim((string) $section));
-    return $block === '' ? "{$year} BLOCK" : "{$year} BLOCK ({$block})";
-};
-
 $normalizeProgramCode = static function ($value): string {
     $text = strtoupper(trim((string) $value));
     if ($text === '') {
@@ -238,6 +336,39 @@ $normalizeProgramCode = static function ($value): string {
         return 'BSCPE';
     }
     return '';
+};
+
+$format_block_label = static function (array $row, array &$job_input_cache) use ($normalizeProgramCode): string {
+    $jobId = (int) ($row['job_id'] ?? 0);
+    if (!array_key_exists($jobId, $job_input_cache)) {
+        $raw = (string) ($row['input_data'] ?? '');
+        $decoded = json_decode($raw, true);
+        $job_input_cache[$jobId] = is_array($decoded) ? $decoded : [];
+    }
+
+    $jobInput = $job_input_cache[$jobId] ?? [];
+    $programCode = $normalizeProgramCode($row['program_code'] ?? '');
+    if ($programCode === '') {
+        $programCode = $normalizeProgramCode($row['program_name'] ?? '');
+    }
+    if ($programCode === '') {
+        $programCode = $normalizeProgramCode($jobInput['program'] ?? '');
+    }
+    if ($programCode === '' && !empty($jobInput['program_id'])) {
+        $programCode = $normalizeProgramCode((string) $jobInput['program_id']);
+    }
+    if ($programCode === '') {
+        $programCode = $normalizeProgramCode($row['department'] ?? '');
+    }
+
+    $year = (int) ($row['year_level'] ?? 0);
+    $block = strtoupper(trim((string) ($row['section'] ?? '')));
+    $suffix = $block === '' ? (string) $year : ($year . $block);
+
+    if ($programCode === '') {
+        return $suffix;
+    }
+    return trim($programCode . ' ' . $suffix);
 };
 
 $format_course_code = static function (array $row, array &$job_input_cache) use ($normalizeProgramCode): string {
@@ -293,6 +424,38 @@ $format_subject_description = static function (array $row): string {
     return $subjectName;
 };
 
+$build_section_row_signature = static function (array $row): string {
+    $subjectKey = strtoupper(trim((string) ($row['subject_code'] ?? '')));
+    if ($subjectKey === '') {
+        $subjectKey = (string) ((int) ($row['subject_id'] ?? 0));
+    }
+
+    $meetingKind = strtolower(trim((string) ($row['meeting_kind'] ?? '')));
+    if ($meetingKind === '') {
+        $lectureHours = (float) ($row['lecture_hours'] ?? 0);
+        $labHours = (float) ($row['lab_hours'] ?? 0);
+        if ($lectureHours > 0 && $labHours <= 0) {
+            $meetingKind = 'lecture';
+        } elseif ($labHours > 0 && $lectureHours <= 0) {
+            $meetingKind = 'lab';
+        } elseif ($lectureHours > 0 && $labHours > 0) {
+            $meetingKind = ((int) ($row['has_computers'] ?? 0) === 1) ? 'lab' : 'lecture';
+        }
+    }
+
+    return implode('|', [
+        (string) $subjectKey,
+        strtoupper(trim((string) ($row['subject_name'] ?? ''))),
+        $meetingKind,
+        (string) ($row['start_time'] ?? ''),
+        (string) ($row['end_time'] ?? ''),
+        strtoupper(trim((string) ($row['instructor_name'] ?? ''))),
+        strtoupper(trim((string) ($row['room_number'] ?? ''))),
+        (string) ($row['credits'] ?? ''),
+        (string) ($row['scheduled_hours'] ?? $row['hours_per_week'] ?? ''),
+    ]);
+};
+
 $workload_group_titles = [
     'MTh/Morning' => 'MTH/Morning',
     'MTh/Afternoon' => 'MTH/Afternoon',
@@ -303,12 +466,40 @@ $workload_group_titles = [
     'Saturday' => 'SATURDAY',
 ];
 
+$section_group_titles = [
+    'MTh/A.M.' => 'MTh/A.M.',
+    'MTh/P.M.' => 'MTh/P.M.',
+    'TF/A.M.' => 'TF/A.M.',
+    'TF/P.M.' => 'TF/P.M.',
+    'Wed/A.M.' => 'Wed/Morning',
+    'Wed/P.M.' => 'Wed/Afternoon',
+    'Saturday' => 'SATURDAY',
+];
+
+$format_schedule_time_label = static function ($startTime, $endTime): string {
+    return date('g:i', strtotime((string) $startTime)) . '-' . date('g:i', strtotime((string) $endTime));
+};
+
+$sanitize_export_filename = static function (string $value): string {
+    $value = preg_replace('/[^A-Za-z0-9_-]+/', '_', trim($value));
+    $value = trim((string) $value, '_');
+    return $value !== '' ? $value : 'report';
+};
+
+$job_input_cache = [];
 $by_section = [];
 foreach ($schedules as $row) {
     $sec = (string)($row['section'] ?? '');
-    $key = (int)$row['year_level'] . $sec;
+    $programKey = strtoupper(trim((string)($row['program_code'] ?? '')));
+    if ($programKey === '') {
+        $programKey = strtoupper(trim((string)($row['program_name'] ?? '')));
+    }
+    if ($programKey === '') {
+        $programKey = strtoupper(trim((string)($row['department'] ?? '')));
+    }
+    $key = $programKey . '|' . (int)$row['year_level'] . '|' . strtoupper(trim($sec));
     if (!isset($by_section[$key])) {
-        $by_section[$key] = ['label' => $format_block_label($row['year_level'], $sec), 'rows' => []];
+        $by_section[$key] = ['label' => $format_block_label($row, $job_input_cache), 'rows' => []];
     }
     $by_section[$key]['rows'][] = $row;
 }
@@ -316,6 +507,7 @@ foreach ($schedules as $row) {
 // Within each section, group by day group (e.g. MTh/A.M.) and sort by time
 foreach ($by_section as $key => &$section) {
     $by_day = [];
+    $section_seen_rows = [];
     $section_total_units = 0.0;
     $counted_subject_units = [];
     foreach ($section['rows'] as $row) {
@@ -330,7 +522,11 @@ foreach ($by_section as $key => &$section) {
             $by_day[$group_key] = [];
         }
         $row['report_time_label'] = $format_workload_time($row['start_time'], $row['end_time']);
-        $by_day[$group_key][] = $row;
+        $row_signature = $group_key . '|' . $build_section_row_signature($row);
+        if (!isset($section_seen_rows[$row_signature])) {
+            $by_day[$group_key][] = $row;
+            $section_seen_rows[$row_signature] = true;
+        }
         $subject_unit_key = (int) ($row['subject_id'] ?? 0);
         if ($subject_unit_key <= 0) {
             $subject_unit_key = trim((string) ($row['subject_code'] ?? ''));
@@ -354,12 +550,22 @@ unset($section);
 
 // Sort blocks for output by year level then block letter.
 uksort($by_section, function ($a, $b) {
-    preg_match('/^(\d+)(.*)$/', $a, $ma);
-    preg_match('/^(\d+)(.*)$/', $b, $mb);
-    $year_a = (int)($ma[1] ?? 0);
-    $year_b = (int)($mb[1] ?? 0);
-    if ($year_a !== $year_b) return $year_a - $year_b;
-    return strcmp($ma[2] ?? '', $mb[2] ?? '');
+    $partsA = explode('|', (string)$a, 3);
+    $partsB = explode('|', (string)$b, 3);
+    $programA = $partsA[0] ?? '';
+    $programB = $partsB[0] ?? '';
+    $yearA = (int)($partsA[1] ?? 0);
+    $yearB = (int)($partsB[1] ?? 0);
+    $sectionA = $partsA[2] ?? '';
+    $sectionB = $partsB[2] ?? '';
+
+    if ($programA !== $programB) {
+        return strcmp($programA, $programB);
+    }
+    if ($yearA !== $yearB) {
+        return $yearA - $yearB;
+    }
+    return strcmp($sectionA, $sectionB);
 });
 
 // Instructor-specific workload view data
@@ -372,6 +578,7 @@ $total_units_with_deloading = 0.0;
 $is_overloaded = false;
 $overload_approved = false;
 $overload_approval = null;
+$overload_subjects = [];
 if (!empty($instructor_id)) {
     $stmt = $pdo->prepare("
         SELECT i.id, u.full_name, i.department, i.status,
@@ -384,7 +591,6 @@ if (!empty($instructor_id)) {
     ");
     $stmt->execute([$instructor_id]);
     $selected_instructor = $stmt->fetch(PDO::FETCH_ASSOC);
-    $job_input_cache = [];
 
     $counted_instructor_subject_units = [];
     foreach ($schedules as $row) {
@@ -410,9 +616,34 @@ if (!empty($instructor_id)) {
             $total_units += (float)($row['credits'] ?? 0);
             $counted_instructor_subject_units[$subject_unit_key] = true;
         }
-        $total_hours += (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0);
+        $row_hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0);
+        $total_hours += $row_hours;
+
+        $overload_subject_key = (int)($row['subject_id'] ?? 0);
+        if ($overload_subject_key <= 0) {
+            $overload_subject_key = strtoupper(trim((string)($row['subject_code'] ?? '')));
+        }
+        if (!isset($overload_subjects[$overload_subject_key])) {
+            $overload_subjects[$overload_subject_key] = [
+                'subject_code' => (string)($row['subject_code'] ?? ''),
+                'subject_name' => (string)($row['subject_name'] ?? ''),
+                'hours' => 0.0,
+            ];
+        }
+        $overload_subjects[$overload_subject_key]['hours'] += $row_hours;
     }
     $total_hours = round($total_hours, 2);
+    foreach ($overload_subjects as &$overload_subject) {
+        $overload_subject['hours'] = round((float)$overload_subject['hours'], 2);
+    }
+    unset($overload_subject);
+    uasort($overload_subjects, function ($a, $b) {
+        $hoursCompare = (float)($b['hours'] ?? 0) <=> (float)($a['hours'] ?? 0);
+        if ($hoursCompare !== 0) {
+            return $hoursCompare;
+        }
+        return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+    });
     $total_units_with_deloading = $total_units
         + (float)($selected_instructor['designation_units'] ?? 0)
         + (float)($selected_instructor['research_extension_units'] ?? 0)
@@ -458,13 +689,118 @@ if (!empty($instructor_id)) {
     }
 }
 
-// Get filter options
-$departments = $pdo->query("SELECT DISTINCT department FROM schedules WHERE department IS NOT NULL")->fetchAll();
-$instructors = $pdo->query("
-    SELECT i.id, u.full_name 
-    FROM instructors i 
-    JOIN users u ON i.user_id = u.id
-")->fetchAll();
+$export_type = strtolower(trim((string) ($_GET['export'] ?? '')));
+if (in_array($export_type, ['csv', 'excel'], true)) {
+    $day_sort_order = [
+        'Monday' => 1,
+        'Tuesday' => 2,
+        'Wednesday' => 3,
+        'Thursday' => 4,
+        'Friday' => 5,
+        'Saturday' => 6,
+    ];
+    $sorted_export_source = $schedules;
+    usort($sorted_export_source, static function (array $a, array $b) use ($day_sort_order): int {
+        $programA = strtoupper(trim((string) ($a['program_code'] ?: $a['program_name'] ?: '')));
+        $programB = strtoupper(trim((string) ($b['program_code'] ?: $b['program_name'] ?: '')));
+        if ($programA !== $programB) {
+            return strcmp($programA, $programB);
+        }
+
+        $yearA = (int) ($a['year_level'] ?? 0);
+        $yearB = (int) ($b['year_level'] ?? 0);
+        if ($yearA !== $yearB) {
+            return $yearA <=> $yearB;
+        }
+
+        $sectionA = strtoupper(trim((string) ($a['section'] ?? '')));
+        $sectionB = strtoupper(trim((string) ($b['section'] ?? '')));
+        if ($sectionA !== $sectionB) {
+            return strcmp($sectionA, $sectionB);
+        }
+
+        $dayA = $day_sort_order[(string) ($a['day'] ?? '')] ?? 99;
+        $dayB = $day_sort_order[(string) ($b['day'] ?? '')] ?? 99;
+        if ($dayA !== $dayB) {
+            return $dayA <=> $dayB;
+        }
+
+        return strcmp((string) ($a['start_time'] ?? ''), (string) ($b['start_time'] ?? ''));
+    });
+
+    $export_headers = ['Department', 'Program', 'Year Level', 'Section', 'Day', 'Start Time', 'End Time', 'Subject Code', 'Subject Name', 'Description', 'Units', 'Hours', 'Instructor', 'Room', 'Block Label'];
+    $export_rows = [];
+    $last_program = null;
+    foreach ($sorted_export_source as $row) {
+        $current_program = (string) ($row['program_code'] ?: $row['program_name'] ?: 'Unassigned');
+        if ($last_program !== null && strcasecmp($last_program, $current_program) !== 0) {
+            $export_rows[] = array_fill_keys($export_headers, '');
+        }
+        $last_program = $current_program;
+
+        $export_rows[] = [
+            'Department' => (string) ($row['dept_code'] ?: $row['dept_name'] ?: ''),
+            'Program' => $current_program,
+            'Year Level' => (string) ($row['year_level'] ?? ''),
+            'Section' => (string) ($row['section'] ?? ''),
+            'Day' => (string) ($row['day'] ?? ''),
+            'Start Time' => date('h:i A', strtotime((string) ($row['start_time'] ?? ''))),
+            'End Time' => date('h:i A', strtotime((string) ($row['end_time'] ?? ''))),
+            'Subject Code' => (string) ($row['subject_code'] ?? ''),
+            'Subject Name' => (string) ($row['subject_name'] ?? ''),
+            'Description' => $format_subject_description($row),
+            'Units' => (string) ($row['credits'] ?? ''),
+            'Hours' => number_format((float) ($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0), 2),
+            'Instructor' => (string) ($row['instructor_name'] ?? ''),
+            'Room' => (string) ($row['room_number'] ?? ''),
+            'Block Label' => $format_block_label($row, $job_input_cache),
+        ];
+    }
+
+    $file_parts = ['schedule_report'];
+    if ($program_lookup !== '') {
+        $file_parts[] = $sanitize_export_filename($program_lookup);
+    }
+    if ($instructor_lookup !== '') {
+        $file_parts[] = $sanitize_export_filename($instructor_lookup);
+    }
+    if ($year_level !== '') {
+        $file_parts[] = 'year_' . $sanitize_export_filename((string) $year_level);
+    }
+    $file_parts[] = date('Y-m-d');
+    $filename = implode('_', array_filter($file_parts));
+
+    if ($export_type === 'csv') {
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '.csv"');
+        $output = fopen('php://output', 'w');
+        fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
+        fputcsv($output, $export_headers);
+        foreach ($export_rows as $export_row) {
+            fputcsv($output, $export_row);
+        }
+        fclose($output);
+        exit();
+    }
+
+    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '.xls"');
+    echo "\xEF\xBB\xBF";
+    echo '<table border="1"><thead><tr>';
+    foreach ($export_headers as $header_label) {
+        echo '<th>' . htmlspecialchars($header_label) . '</th>';
+    }
+    echo '</tr></thead><tbody>';
+    foreach ($export_rows as $export_row) {
+        echo '<tr>';
+        foreach ($export_row as $value) {
+            echo '<td>' . htmlspecialchars((string) $value) . '</td>';
+        }
+        echo '</tr>';
+    }
+    echo '</tbody></table>';
+    exit();
+}
 
 // Handle print request
 if (isset($_GET['print'])) {
@@ -481,20 +817,82 @@ if (isset($_GET['print'])) {
     <link rel="stylesheet" href="../css/style.css">
     <style>
         .schedule-section-block {
-            border: 1px solid #333;
+            border: 1px solid #000;
             margin-bottom: 2rem;
+            background: #fff;
             page-break-inside: avoid;
         }
         .schedule-section-header {
             padding: 10px 14px;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid #000;
             font-weight: 700;
             font-size: 15px;
         }
-        .schedule-report-table { width: 100%; border-collapse: collapse; margin-bottom: 0; }
-        .schedule-report-table th, .schedule-report-table td { border: 1px solid #000; padding: 6px 7px; text-align: left; }
-        .schedule-report-table thead th { background: #f2f2f2; }
-        .schedule-report-table .day-group-header td { background: #f0f0f0; font-weight: bold; }
+        .schedule-report-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            margin-bottom: 0;
+            font-size: 13px;
+        }
+        .schedule-report-table th,
+        .schedule-report-table td {
+            border: 1px solid #000;
+            padding: 6px 7px;
+            vertical-align: middle;
+        }
+        .schedule-report-table thead th {
+            background: #f5f5f5;
+            text-align: center;
+            font-weight: 700;
+        }
+        .schedule-report-table .col-time { width: 12%; }
+        .schedule-report-table .col-code { width: 10%; }
+        .schedule-report-table .col-description { width: 34%; }
+        .schedule-report-table .col-units { width: 8%; }
+        .schedule-report-table .col-hours { width: 8%; }
+        .schedule-report-table .col-instructor { width: 18%; }
+        .schedule-report-table .col-room { width: 10%; }
+        .schedule-report-table td.col-center,
+        .schedule-report-table th.col-center {
+            text-align: center;
+        }
+        .schedule-report-table .day-group-header td {
+            background: #fff;
+            font-weight: 700;
+            font-size: 19px;
+            padding: 4px 8px;
+        }
+        .schedule-report-table .day-group-header td:first-child {
+            text-align: left;
+        }
+        .schedule-report-table .day-group-header td:not(:first-child) {
+            background: #fff;
+        }
+        .schedule-report-table .special-row,
+        .schedule-report-table .special-row td {
+            text-align: center;
+            font-weight: 700;
+            background: #fff;
+        }
+        .schedule-report-table .lunch-row td {
+            text-align: center;
+            font-weight: 700;
+            background: #fff;
+            padding: 3px 8px;
+        }
+        .schedule-report-table .subject-code-cell {
+            background: #fff35c;
+            font-weight: 700;
+            text-align: center;
+        }
+        .schedule-report-table .instructor-cell {
+            text-align: center;
+        }
+        .schedule-report-table .description-cell {
+            text-align: center;
+            line-height: 1.25;
+        }
         .schedule-report-table .section-total-row td {
             font-weight: 700;
             background: #fafafa;
@@ -693,8 +1091,8 @@ if (isset($_GET['print'])) {
         }
         .report-signature-sheet {
             margin-top: 28px;
-            border: 1px solid #333;
-            padding: 18px 20px;
+            border: none;
+            padding: 18px 0 0;
             page-break-inside: avoid;
         }
         .report-signature-grid {
@@ -729,8 +1127,7 @@ if (isset($_GET['print'])) {
         }
         .report-contact-footer {
             margin-top: 20px;
-            padding-top: 14px;
-            border-top: 1px solid #999;
+            padding-top: 6px;
             display: flex;
             justify-content: space-between;
             align-items: flex-end;
@@ -759,18 +1156,197 @@ if (isset($_GET['print'])) {
             height: auto;
             object-fit: contain;
         }
+
+        /* Per-block print buttons (screen only) */
+        .block-print-container {
+            position: relative;
+            margin-bottom: 16px;
+        }
+.block-print-btn {
+            position: absolute;
+            top: 12px;
+            right: 16px;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+            transition: all 0.2s ease;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .block-print-btn:hover {
+            transform: scale(1.08);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        }
+        @media print {
+            @page {
+                size: auto;
+                margin: 0.3in;
+            }
+            html,
+            body {
+                width: auto;
+                min-height: auto;
+                margin: 0;
+                padding: 0;
+                font-size: 9.5px;
+                background: #fff;
+            }
+            .container {
+                width: 100%;
+                max-width: 7.35in;
+                margin: 0 auto;
+                padding: 0;
+            }
+            .block-print-btn {
+                display: none !important;
+            }
+            body.printing-block .schedule-section-block:not(.printing),
+            body.printing-block .workload-sheet:not(.printing) {
+                display: none !important;
+            }
+            body.printing-block .header,
+            body.printing-block .filter-section,
+            body.printing-block .container > *:not(.printing),
+            body.printing-block .report-signatory-settings {
+                display: none !important;
+            }
+            body.printing-block .schedule-section-block.printing,
+            body.printing-block .workload-sheet.printing {
+                width: 100%;
+                max-width: 7.35in;
+                margin: 0 auto;
+                box-sizing: border-box;
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            .schedule-section-block,
+            .workload-sheet,
+            .report-signature-sheet {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            .schedule-section-block {
+                margin-bottom: 0;
+            }
+            .report-main-header {
+                margin-bottom: 8px;
+            }
+            .report-main-header img {
+                width: 46px;
+                margin-bottom: 3px;
+            }
+            .report-main-header .country-line {
+                font-size: 9px;
+            }
+            .report-main-header .university-line {
+                font-size: 13px;
+            }
+            .report-main-header .department-line {
+                font-size: 11px;
+            }
+            .report-main-header .title-line {
+                font-size: 10px;
+            }
+            .report-main-header .term-line {
+                font-size: 9px;
+            }
+            .schedule-section-header {
+                padding: 4px 8px;
+                font-size: 10px;
+            }
+            .schedule-report-table,
+            .workload-table,
+            .workload-summary {
+                font-size: 8px;
+            }
+            .schedule-report-table th,
+            .schedule-report-table td,
+            .workload-table th,
+            .workload-table td,
+            .workload-summary td {
+                padding: 2px 3px;
+            }
+            .schedule-report-table .day-group-header td {
+                font-size: 9px;
+                padding: 2px 3px;
+            }
+            .schedule-report-table .description-cell {
+                line-height: 1.05;
+            }
+            .report-signature-sheet {
+                margin-top: 8px;
+                padding: 8px 0 0;
+            }
+            .report-signature-grid {
+                gap: 10px;
+                margin-bottom: 8px;
+            }
+            .signature-label {
+                font-size: 8px;
+                margin-bottom: 10px;
+            }
+            .signature-name {
+                font-size: 10px;
+            }
+            .signature-title,
+            .report-signature-meta,
+            .report-contact-lines div,
+            .report-contact-lines a {
+                font-size: 8px;
+            }
+            .report-contact-footer {
+                margin-top: 6px;
+                padding-top: 2px;
+                gap: 8px;
+            }
+            .report-contact-logos img {
+                width: 30px;
+            }
+        }
     </style>
+
     <?php if (isset($print_mode)): ?>
     <style>
+        @page { size: auto; margin: 0.3in; }
         body { font-family: Arial, sans-serif; }
         .no-print { display: none; }
         .print-only { display: block; }
         table { width: 100%; border-collapse: collapse; }
-        th, td { border: 1px solid #000; padding: 8px; text-align: left; }
+        th, td { border: 1px solid #000; padding: 3px; text-align: left; }
         th { background-color: #f2f2f2; }
-        .schedule-section-block { border: 1px solid #000; margin-bottom: 1.5rem; page-break-inside: avoid; }
-        .schedule-section-header { background: #333 !important; color: #fff !important; padding: 8px 12px; }
-        .report-signature-sheet { border: 1px solid #000; }
+        .container { width: 100%; max-width: 7.35in; margin: 0 auto; padding: 0; }
+        .schedule-section-block,
+        .workload-sheet { border: 1px solid #000; margin-bottom: 0.5rem; page-break-inside: avoid; break-inside: avoid; }
+        .schedule-section-header { background: #333 !important; color: #fff !important; padding: 4px 8px; font-size: 10px; }
+        .schedule-report-table,
+        .workload-table,
+        .workload-summary { font-size: 8px; }
+        .report-main-header img { width: 46px; }
+        .report-main-header .country-line { font-size: 9px; }
+        .report-main-header .university-line { font-size: 13px; }
+        .report-main-header .department-line { font-size: 11px; }
+        .report-main-header .title-line { font-size: 10px; }
+        .report-main-header .term-line { font-size: 9px; }
+        .report-signature-sheet { border: none; padding: 8px 0 0; margin-top: 8px; }
+        .signature-label { font-size: 8px; margin-bottom: 10px; }
+        .signature-name { font-size: 10px; }
+        .signature-title,
+        .report-signature-meta,
+        .report-contact-lines div,
+        .report-contact-lines a { font-size: 8px; }
+        .report-contact-footer { margin-top: 6px; padding-top: 2px; border-top: none; }
+        .report-contact-logos img { width: 30px; }
     </style>
     <?php endif; ?>
 </head>
@@ -804,17 +1380,31 @@ if (isset($_GET['print'])) {
         <div class="filter-section">
             <h3>Filter Schedules</h3>
             <form method="GET" action="" class="filter-form">
+                <datalist id="report_department_options">
+                    <?php foreach ($departments as $dept): ?>
+                    <option value="<?php echo htmlspecialchars($dept['dept_name'] . ' (' . $dept['dept_code'] . ')'); ?>"></option>
+                    <option value="<?php echo htmlspecialchars($dept['dept_code']); ?>"></option>
+                    <?php endforeach; ?>
+                </datalist>
+                <datalist id="report_program_options">
+                    <?php foreach ($programs as $prog): ?>
+                    <option value="<?php echo htmlspecialchars($prog['program_name'] . ' (' . $prog['program_code'] . ')'); ?>" data-department-id="<?php echo (int)($prog['department_id'] ?? 0); ?>"></option>
+                    <option value="<?php echo htmlspecialchars($prog['program_code']); ?>" data-department-id="<?php echo (int)($prog['department_id'] ?? 0); ?>"></option>
+                    <?php endforeach; ?>
+                </datalist>
+                <datalist id="report_instructor_options">
+                    <?php foreach ($instructors as $inst): ?>
+                    <option value="<?php echo htmlspecialchars($inst['full_name']); ?>"></option>
+                    <?php endforeach; ?>
+                </datalist>
                 <div class="form-group">
                     <label for="department">Department:</label>
-                    <select id="department" name="department">
-                        <option value="">All Departments</option>
-                        <?php foreach ($departments as $dept): ?>
-                        <option value="<?php echo $dept['department']; ?>" 
-                                <?php echo $department == $dept['department'] ? 'selected' : ''; ?>>
-                            <?php echo $dept['department']; ?>
-                        </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <input type="text" id="department" name="department" list="report_department_options" value="<?php echo htmlspecialchars($department_lookup); ?>" placeholder="Type department...">
+                </div>
+
+                <div class="form-group">
+                    <label for="program">Program:</label>
+                    <input type="text" id="program" name="program" list="report_program_options" value="<?php echo htmlspecialchars($program_lookup); ?>" placeholder="Type program...">
                 </div>
                 
                 <div class="form-group">
@@ -829,16 +1419,8 @@ if (isset($_GET['print'])) {
                 </div>
                 
                 <div class="form-group">
-                    <label for="instructor_id">Instructor:</label>
-                    <select id="instructor_id" name="instructor_id">
-                        <option value="">All Instructors</option>
-                        <?php foreach ($instructors as $inst): ?>
-                        <option value="<?php echo $inst['id']; ?>" 
-                                <?php echo $instructor_id == $inst['id'] ? 'selected' : ''; ?>>
-                            <?php echo $inst['full_name']; ?>
-                        </option>
-                        <?php endforeach; ?>
-                    </select>
+                    <label for="instructor">Instructor:</label>
+                    <input type="text" id="instructor" name="instructor" list="report_instructor_options" value="<?php echo htmlspecialchars($instructor_lookup); ?>" placeholder="Type instructor name...">
                 </div>
                 
                 <div class="form-actions">
@@ -846,6 +1428,8 @@ if (isset($_GET['print'])) {
                     <a href="report.php" class="btn-secondary">Clear Filters</a>
                     <a href="report.php?print=1&<?php echo http_build_query($_GET); ?>" 
                        class="btn-primary" target="_blank">Print Report</a>
+                    <a href="report.php?export=csv&<?php echo http_build_query($_GET); ?>" class="btn-secondary">Download CSV</a>
+                    <a href="report.php?export=excel&<?php echo http_build_query($_GET); ?>" class="btn-secondary">Download Excel</a>
                 </div>
             </form>
         </div>
@@ -860,16 +1444,20 @@ if (isset($_GET['print'])) {
                     $workload_order = ['MTh/Morning', 'MTh/Afternoon', 'Wed/Morning', 'Wed/Afternoon', 'TF/Morning', 'TF/Afternoon', 'Saturday'];
                 ?>
                 <div class="workload-sheet">
-                    <div class="report-main-header">
-                        <img src="../assets/logo.png" alt="NEMSU logo">
-                        <div class="country-line"><?php echo htmlspecialchars($signatories['header_country']); ?></div>
-                        <div class="university-line"><?php echo htmlspecialchars($signatories['header_university']); ?></div>
-                        <div class="department-line"><?php echo htmlspecialchars($signatories['header_department']); ?></div>
-                        <div class="title-line">FACULTY WORKLOAD</div>
-                        <div class="term-line"><?php echo htmlspecialchars($signatories['header_term']); ?></div>
+                    <div class="block-print-container">
+                        <div class="report-main-header">
+                            <img src="../assets/logo.png" alt="NEMSU logo">
+                            <div class="country-line"><?php echo htmlspecialchars($signatories['header_country']); ?></div>
+                            <div class="university-line"><?php echo htmlspecialchars($signatories['header_university']); ?></div>
+                            <div class="department-line"><?php echo htmlspecialchars($signatories['header_department']); ?></div>
+                            <div class="title-line">FACULTY WORKLOAD</div>
+                            <div class="term-line"><?php echo htmlspecialchars($signatories['header_term']); ?></div>
+                        </div>
+                        <button class="block-print-btn" onclick="printBlock(this)" title="Print this workload">Print</button>
                     </div>
 
                     <div class="workload-meta">
+
                         <div class="meta-line"><span class="meta-label">Name:</span><span><?php echo htmlspecialchars($selected_instructor['full_name'] ?? ''); ?></span></div>
                         <div class="meta-line"><span class="meta-label">Educ'l Qualification:</span><span>-</span></div>
                         <div class="meta-line"><span class="meta-label">Years in Service:</span><span>-</span></div>
@@ -882,7 +1470,21 @@ if (isset($_GET['print'])) {
                         <div class="error" style="margin-bottom: 12px;">
                             <strong>Overload Warning:</strong>
                             This instructor has <strong><?php echo number_format($total_hours, 2); ?> hours</strong>,
-                            which exceeds the 30-hour weekly limit.
+                            which exceeds the 30-hour weekly limit by
+                            <strong><?php echo number_format(max(0, $total_hours - $weekly_hour_limit), 2); ?> hours</strong>.
+                            <?php if (!empty($overload_subjects)): ?>
+                                <div style="margin-top: 10px;">
+                                    <strong>Subjects included in this overload:</strong>
+                                    <ul style="margin-top: 6px;">
+                                        <?php foreach ($overload_subjects as $overload_subject): ?>
+                                            <li>
+                                                <?php echo htmlspecialchars(trim(($overload_subject['subject_code'] ?? '') . ' - ' . ($overload_subject['subject_name'] ?? ''), ' -')); ?>
+                                                : <?php echo number_format((float)($overload_subject['hours'] ?? 0), 2); ?> hour(s)
+                                            </li>
+                                        <?php endforeach; ?>
+                                    </ul>
+                                </div>
+                            <?php endif; ?>
                             <form method="POST" style="margin-top: 10px;">
                                 <input type="hidden" name="instructor_id" value="<?php echo (int)$instructor_id; ?>">
                                 <input type="hidden" name="total_hours" value="<?php echo htmlspecialchars((string)$total_hours); ?>">
@@ -895,6 +1497,19 @@ if (isset($_GET['print'])) {
                             <?php echo number_format($total_hours, 2); ?> hours approved by
                             <?php echo htmlspecialchars($overload_approval['approver_name'] ?? 'Admin'); ?>
                             on <?php echo htmlspecialchars(date('F j, Y g:i A', strtotime((string)($overload_approval['created_at'] ?? 'now')))); ?>.
+                            <?php if (!empty($overload_subjects)): ?>
+                                <div style="margin-top: 10px;">
+                                    <strong>Overload subjects:</strong>
+                                    <ul style="margin-top: 6px;">
+                                        <?php foreach ($overload_subjects as $overload_subject): ?>
+                                            <li>
+                                                <?php echo htmlspecialchars(trim(($overload_subject['subject_code'] ?? '') . ' - ' . ($overload_subject['subject_name'] ?? ''), ' -')); ?>
+                                                : <?php echo number_format((float)($overload_subject['hours'] ?? 0), 2); ?> hour(s)
+                                            </li>
+                                        <?php endforeach; ?>
+                                    </ul>
+                                </div>
+                            <?php endif; ?>
                         </div>
                     <?php endif; ?>
 
@@ -999,30 +1614,34 @@ if (isset($_GET['print'])) {
                             </div>
                         </div>
                     </div>
+                    <?php $renderReportFooter($signatories); ?>
                 </div>
             <?php else: ?>
                 <?php foreach ($by_section as $sectionKey => $section): ?>
                 <div class="schedule-section-block">
-                    <div class="report-main-header" style="padding: 16px 16px 0;">
-                        <img src="../assets/logo.png" alt="NEMSU logo">
-                        <div class="country-line"><?php echo htmlspecialchars($signatories['header_country']); ?></div>
-                        <div class="university-line"><?php echo htmlspecialchars($signatories['header_university']); ?></div>
-                        <div>|</div>
-                        <div class="department-line"><?php echo htmlspecialchars($signatories['header_department']); ?></div>
-                        <div class="title-line"><?php echo htmlspecialchars($signatories['header_title']); ?></div>
-                        <div class="term-line"><?php echo htmlspecialchars($signatories['header_term']); ?></div>
+                    <div class="block-print-container">
+                        <div class="report-main-header" style="padding: 16px 16px 0;">
+                            <img src="../assets/logo.png" alt="NEMSU logo">
+                            <div class="country-line"><?php echo htmlspecialchars($signatories['header_country']); ?></div>
+                            <div class="university-line"><?php echo htmlspecialchars($signatories['header_university']); ?></div>
+                            <div>|</div>
+                            <div class="department-line"><?php echo htmlspecialchars($signatories['header_department']); ?></div>
+                            <div class="title-line"><?php echo htmlspecialchars($signatories['header_title']); ?></div>
+                            <div class="term-line"><?php echo htmlspecialchars($signatories['header_term']); ?></div>
+                        </div>
+                        <button class="block-print-btn" onclick="printBlock(this)" title="Print Schedule Block">Print</button>
                     </div>
                     <div class="schedule-section-header">Course/Year/Sec. <?php echo htmlspecialchars(str_replace([' BLOCK (', ')', ' BLOCK'], ['', '', ''], $section['label'])); ?></div>
                     <table class="schedule-report-table">
                         <thead>
                             <tr>
-                                <th>TIME/DAY</th>
-                                <th>Subject Code</th>
-                                <th>Description</th>
-                                <th>No. of Units</th>
-                                <th>No. of Hours</th>
-                                <th>Instructor</th>
-                                <th>Room</th>
+                                <th class="col-time">TIME/DAY</th>
+                                <th class="col-code">Subject Code</th>
+                                <th class="col-description">Description</th>
+                                <th class="col-units col-center">No. of Units</th>
+                                <th class="col-hours col-center">No. of Hours</th>
+                                <th class="col-instructor">Instructor</th>
+                                <th class="col-room">Room No.</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1031,27 +1650,34 @@ if (isset($_GET['print'])) {
                             foreach ($order as $groupKey):
                                 if (empty($section['by_day_group'][$groupKey])) continue;
                                 $rows = $section['by_day_group'][$groupKey];
+                                $groupTitle = $section_group_titles[$groupKey] ?? $groupKey;
                             ?>
                             <tr class="day-group-header">
-                                <td colspan="7"><strong><?php echo htmlspecialchars($groupKey === 'Saturday' ? 'SATURDAY' : $groupKey); ?></strong></td>
+                                <td><?php echo htmlspecialchars($groupTitle); ?></td>
+                                <td colspan="6"></td>
                             </tr>
                             <?php if ($groupKey === 'MTh/A.M.'): ?>
                             <tr>
-                                <td>7:00-7:30</td>
-                                <td colspan="6" style="text-align:center;font-weight:600;">Flag Raising Ceremony</td>
+                                <td class="col-center">7:00-7:30</td>
+                                <td colspan="6" class="special-row">Flag Raising Ceremony</td>
                             </tr>
                             <?php endif; ?>
                             <?php foreach ($rows as $r): ?>
                             <tr>
-                                <td><?php echo htmlspecialchars($r['report_time_label']); ?></td>
-                                <td><?php echo htmlspecialchars($r['subject_code']); ?></td>
-                                <td><?php echo htmlspecialchars($format_subject_description($r)); ?></td>
-                                <td><?php echo (int)($r['credits'] ?? 0); ?></td>
-                                <td><?php echo number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0), 2); ?></td>
-                                <td><?php echo htmlspecialchars($r['instructor_name']); ?></td>
-                                <td><?php echo htmlspecialchars($r['room_number'] ?? ''); ?></td>
+                                <td class="col-center"><?php echo htmlspecialchars($format_schedule_time_label($r['start_time'], $r['end_time'])); ?></td>
+                                <td class="subject-code-cell"><?php echo htmlspecialchars($r['subject_code']); ?></td>
+                                <td class="description-cell"><?php echo htmlspecialchars($format_subject_description($r)); ?></td>
+                                <td class="col-center"><?php echo (int)($r['credits'] ?? 0); ?></td>
+                                <td class="col-center"><?php echo number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0), 2); ?></td>
+                                <td class="instructor-cell"><?php echo htmlspecialchars($r['instructor_name']); ?></td>
+                                <td class="col-center"><?php echo htmlspecialchars($r['room_number'] ?? ''); ?></td>
                             </tr>
                             <?php endforeach; ?>
+                            <?php if (in_array($groupKey, ['MTh/A.M.', 'TF/A.M.', 'Wed/A.M.'], true) && !empty($section['by_day_group'][str_replace('A.M.', 'P.M.', $groupKey)])): ?>
+                            <tr class="lunch-row">
+                                <td colspan="7">Lunch Break</td>
+                            </tr>
+                            <?php endif; ?>
                             <?php endforeach; ?>
                             <tr class="section-total-row">
                                 <td colspan="3" style="text-align:right;">TOTAL UNITS</td>
@@ -1060,6 +1686,7 @@ if (isset($_GET['print'])) {
                             </tr>
                         </tbody>
                     </table>
+                    <?php $renderReportFooter($signatories); ?>
                 </div>
                 <?php endforeach; ?>
             <?php endif; ?>
@@ -1124,81 +1751,102 @@ if (isset($_GET['print'])) {
         </div>
         <?php endif; ?>
 
-        <?php if (empty($instructor_id)): ?>
-        <div class="report-signature-sheet">
-            <div class="report-signature-grid">
-                <div>
-                    <div class="signature-label"><?php echo htmlspecialchars($signatories['prepared_by_label']); ?></div>
-                    <div class="signature-name"><?php echo htmlspecialchars($signatories['prepared_by_name']); ?></div>
-                    <div class="signature-title"><?php echo htmlspecialchars($signatories['prepared_by_title']); ?></div>
-                </div>
-                <div>
-                    <div class="signature-label"><?php echo htmlspecialchars($signatories['recommending_label']); ?></div>
-                    <div class="signature-name"><?php echo htmlspecialchars($signatories['recommending_name']); ?></div>
-                    <div class="signature-title"><?php echo htmlspecialchars($signatories['recommending_title']); ?></div>
-                </div>
-            </div>
-
-            <div class="report-signature-grid single">
-                <div>
-                    <div class="signature-label"><?php echo htmlspecialchars($signatories['noted_by_label']); ?></div>
-                    <div class="signature-name"><?php echo htmlspecialchars($signatories['noted_by_name']); ?></div>
-                    <div class="signature-title"><?php echo htmlspecialchars($signatories['noted_by_title']); ?></div>
-                </div>
-            </div>
-
-            <div class="report-signature-grid single">
-                <div>
-                    <div class="signature-label"><?php echo htmlspecialchars($signatories['approved_by_label']); ?></div>
-                    <div class="signature-name"><?php echo htmlspecialchars($signatories['approved_by_name']); ?></div>
-                    <div class="signature-title"><?php echo htmlspecialchars($signatories['approved_by_title']); ?></div>
-                </div>
-            </div>
-
-            <div class="report-signature-meta"><?php echo htmlspecialchars($signatories['document_code']); ?></div>
-
-            <div class="report-contact-footer">
-                <div class="report-contact-lines">
-                    <div><?php echo htmlspecialchars($signatories['contact_address']); ?></div>
-                    <div><?php echo htmlspecialchars($signatories['contact_phone']); ?></div>
-                    <div><a href="https://<?php echo htmlspecialchars($signatories['contact_website']); ?>" target="_blank"><?php echo htmlspecialchars($signatories['contact_website']); ?></a></div>
-                </div>
-                <div class="report-contact-logos">
-                    <?php foreach (['footer_logo_1', 'footer_logo_2', 'footer_logo_3'] as $logo_key): ?>
-                        <?php $logo_src = trim((string) ($signatories[$logo_key] ?? '')); ?>
-                        <?php if ($logo_src !== ''): ?>
-                            <img src="<?php echo htmlspecialchars($logo_src); ?>" alt="Footer logo">
-                        <?php endif; ?>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-        </div>
-        <?php else: ?>
-        <div class="report-contact-footer">
-            <div class="report-contact-lines">
-                <div><?php echo htmlspecialchars($signatories['contact_address']); ?></div>
-                <div><?php echo htmlspecialchars($signatories['contact_phone']); ?></div>
-                <div><a href="https://<?php echo htmlspecialchars($signatories['contact_website']); ?>" target="_blank"><?php echo htmlspecialchars($signatories['contact_website']); ?></a></div>
-            </div>
-            <div class="report-contact-logos">
-                <?php foreach (['footer_logo_1', 'footer_logo_2', 'footer_logo_3'] as $logo_key): ?>
-                    <?php $logo_src = trim((string) ($signatories[$logo_key] ?? '')); ?>
-                    <?php if ($logo_src !== ''): ?>
-                        <img src="<?php echo htmlspecialchars($logo_src); ?>" alt="Footer logo">
-                    <?php endif; ?>
-                <?php endforeach; ?>
-            </div>
-        </div>
-        <?php endif; ?>
-        
         <?php if (isset($print_mode)): ?>
         <div class="print-footer">
             <p>Generated on: <?php echo date('Y-m-d H:i:s'); ?></p>
         </div>
-        <script>
-            window.onload = function() { window.print(); }
-        </script>
         <?php endif; ?>
+        <script>
+            function printBlock(btn) {
+                const block = btn.closest('.schedule-section-block') || btn.closest('.workload-sheet');
+                if (!block) {
+                    window.print();
+                    return;
+                }
+
+                document.body.classList.add('printing-block');
+                block.closest('.schedule-report')?.classList.add('printing');
+                block.classList.add('printing');
+                setTimeout(() => window.print(), 100);
+            }
+
+            window.addEventListener('afterprint', function () {
+                document.body.classList.remove('printing-block');
+                document.querySelectorAll('.printing').forEach(function (node) {
+                    node.classList.remove('printing');
+                });
+            });
+
+            const departmentInput = document.getElementById('department');
+            const programInput = document.getElementById('program');
+            const departmentOptions = <?php echo json_encode(array_map(function ($dept) {
+                return [
+                    'id' => (int)$dept['id'],
+                    'name' => (string)$dept['dept_name'],
+                    'code' => (string)$dept['dept_code'],
+                    'label' => (string)($dept['dept_name'] . ' (' . $dept['dept_code'] . ')'),
+                ];
+            }, $departments), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>;
+            const programOptions = <?php echo json_encode(array_map(function ($prog) {
+                return [
+                    'name' => (string)$prog['program_name'],
+                    'code' => (string)$prog['program_code'],
+                    'label' => (string)($prog['program_name'] . ' (' . $prog['program_code'] . ')'),
+                    'department_id' => (int)($prog['department_id'] ?? 0),
+                ];
+            }, $programs), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>;
+
+            function resolveDepartmentId() {
+                if (!departmentInput) {
+                    return 0;
+                }
+                const current = String(departmentInput.value || '').trim().toLowerCase();
+                const match = departmentOptions.find(option => {
+                    return option.name.toLowerCase() === current
+                        || option.code.toLowerCase() === current
+                        || option.label.toLowerCase() === current;
+                });
+                return match ? Number(match.id || 0) : 0;
+            }
+
+            function syncProgramOptions() {
+                const dataList = document.getElementById('report_program_options');
+                if (!programInput || !dataList) {
+                    return;
+                }
+                const selectedDepartmentId = resolveDepartmentId();
+                const currentValue = String(programInput.value || '').trim().toLowerCase();
+                const allowedPrograms = programOptions.filter(option => selectedDepartmentId === 0 || Number(option.department_id) === selectedDepartmentId);
+                dataList.innerHTML = '';
+                allowedPrograms.forEach(option => {
+                    const byLabel = document.createElement('option');
+                    byLabel.value = option.label;
+                    dataList.appendChild(byLabel);
+
+                    const byCode = document.createElement('option');
+                    byCode.value = option.code;
+                    dataList.appendChild(byCode);
+                });
+                if (currentValue !== '') {
+                    const stillValid = allowedPrograms.some(option =>
+                        option.label.toLowerCase() === currentValue || option.code.toLowerCase() === currentValue || option.name.toLowerCase() === currentValue
+                    );
+                    if (!stillValid) {
+                        programInput.value = '';
+                    }
+                }
+            }
+
+            if (departmentInput && programInput) {
+                departmentInput.addEventListener('input', syncProgramOptions);
+                syncProgramOptions();
+            }
+
+            <?php if (isset($print_mode)): ?>
+            window.onload = function () { window.print(); };
+            <?php endif; ?>
+        </script>
     </div>
 </body>
 </html>
+

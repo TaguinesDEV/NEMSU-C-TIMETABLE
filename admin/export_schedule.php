@@ -5,10 +5,28 @@ requireAdmin();
 $pdo = getDB();
 $job_id = $_GET['job_id'] ?? 0;
 
+$has_scheduled_minutes = false;
+try {
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours");
+    $has_scheduled_minutes = true;
+} catch (Exception $e) {
+    try {
+        $stmt = $pdo->query("SHOW COLUMNS FROM schedules LIKE 'scheduled_minutes'");
+        $has_scheduled_minutes = (bool)$stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Exception $inner) {
+        $has_scheduled_minutes = false;
+    }
+}
+
 // Get job details
 $stmt = $pdo->prepare("SELECT job_name FROM schedule_jobs WHERE id = ?");
 $stmt->execute([$job_id]);
 $job = $stmt->fetch();
+
+if (!$job) {
+    header('Location: view_schedules.php?error=' . urlencode('Schedule job not found.'));
+    exit();
+}
 
 // Get schedule data
 $stmt = $pdo->prepare("
@@ -20,6 +38,7 @@ $stmt = $pdo->prepare("
         ts.day,
         ts.start_time,
         ts.end_time,
+        " . ($has_scheduled_minutes ? "s.scheduled_minutes" : "NULL") . " AS scheduled_minutes,
         s.department
     FROM schedules s
     JOIN subjects sub ON s.subject_id = sub.id
@@ -51,7 +70,7 @@ foreach ($schedules as $schedule) {
     fputcsv($output, [
         $schedule['day'],
         date('h:i A', strtotime($schedule['start_time'])),
-        date('h:i A', strtotime($schedule['end_time'])),
+        date('h:i A', strtotime(!empty($schedule['scheduled_minutes']) ? $schedule['start_time'] . ' +' . (int)$schedule['scheduled_minutes'] . ' minutes' : $schedule['end_time'])),
         $schedule['subject_code'],
         $schedule['subject_name'],
         $schedule['instructor'],

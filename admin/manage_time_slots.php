@@ -232,6 +232,10 @@ foreach ($time_slots as $slot) {
             background-color: #17a2b8;
             color: #fff;
         }
+        .slot-type-lunch {
+            background-color: #28a745;
+            color: #fff;
+        }
         .slot-item > div {
             display: flex;
             align-items: center;
@@ -298,7 +302,7 @@ foreach ($time_slots as $slot) {
                                 <?php if (!empty($slot['slot_type']) && $slot['slot_type'] !== 'regular'): ?>
                                 <span class="slot-type-badge slot-type-<?php echo htmlspecialchars($slot['slot_type']); ?>">
                                     <?php 
-                                    $type_labels = ['makeup' => 'Makeup Class', 'summer' => 'Summer Class'];
+                                    $type_labels = ['makeup' => 'Makeup Class', 'summer' => 'Summer Class', 'lunch' => 'Lunch Break'];
                                     echo $type_labels[$slot['slot_type']] ?? ucfirst($slot['slot_type']); 
                                     ?>
                                 </span>
@@ -351,6 +355,7 @@ foreach ($time_slots as $slot) {
                         <option value="regular">Regular Class</option>
                         <option value="makeup">Makeup Class</option>
                         <option value="summer">Summer Class</option>
+                        <option value="lunch">Lunch Break</option>
                     </select>
                     <small class="form-hint">For Saturday slots, consider using "Makeup Class" or "Summer Class"</small>
                 </div>
@@ -393,6 +398,7 @@ foreach ($time_slots as $slot) {
                         <option value="regular">Regular Class</option>
                         <option value="makeup">Makeup Class</option>
                         <option value="summer">Summer Class</option>
+                        <option value="lunch">Lunch Break</option>
                     </select>
                 </div>
                 

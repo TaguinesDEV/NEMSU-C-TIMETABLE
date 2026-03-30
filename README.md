@@ -52,12 +52,8 @@ academic-scheduling/
 2. Start `Apache` and `MySQL` from XAMPP.
 3. Create the database:
    - `academic_scheduling`
-4. Import SQL files in this order:
-   - `sql/database.sql`
-   - `sql/setup_program_chairs.sql`
-   - `sql/migrate_specializations.sql`
-   - `sql/migrate_subject_type_and_hours.sql`
-   - `sql/add_slot_type.sql`
+4. Import the single setup file:
+   - `sql/academic_scheduling.sql`
 5. Configure DB/Python paths in `config/database.php` if needed:
    - `DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`
    - `PYTHON_PATH` (for Windows typically `python`)
@@ -91,7 +87,7 @@ Change these immediately in non-local environments.
 ## Notes
 
 - `config/database.php` and Python GA both expect the database name `academic_scheduling`.
-- Some legacy SQL in `sql/database.sql` may contain older naming (`academics_cheduling` / `academicscheduling`). Use `academic_scheduling` consistently to match runtime config.
+- `sql/academic_scheduling.sql` is the canonical database setup file in this project.
 - There is a filename typo currently present in the repo: `program_chair/view_schedulde.php`.
 
 ## Troubleshooting

@@ -2,9 +2,14 @@
 require_once '../includes/auth.php';
 requireLogin();
 
-if (isAdmin()) {
-    header('Location: /admin/dashboard.php');
-    exit();
+if (!isInstructor()) {
+    if (isAdmin()) {
+        redirectToApp('admin/dashboard.php');
+    }
+    if (isProgramChair()) {
+        redirectToApp('program_chair/dashboard.php');
+    }
+    redirectToApp('index.php');
 }
 
 $pdo = getDB();
@@ -19,6 +24,10 @@ $stmt = $pdo->prepare("
 ");
 $stmt->execute([$user_id]);
 $instructor = $stmt->fetch();
+
+if (!$instructor) {
+    redirectToApp('index.php');
+}
 
 // Get instructor's specializations
 $stmt = $pdo->prepare("

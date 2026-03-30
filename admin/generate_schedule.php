@@ -5,6 +5,28 @@ requireAdmin();
 $pdo = getDB();
 $message = '';
 $error = '';
+$activeJobSummary = '';
+
+try {
+    $activeJobStmt = $pdo->query("
+        SELECT job_name, status, created_at
+        FROM schedule_jobs
+        WHERE status IN ('pending', 'processing')
+        ORDER BY created_at DESC
+        LIMIT 1
+    ");
+    $activeJob = $activeJobStmt->fetch(PDO::FETCH_ASSOC);
+    if ($activeJob) {
+        $activeJobSummary = sprintf(
+            '%s job "%s" started on %s is still active.',
+            ucfirst((string)$activeJob['status']),
+            (string)$activeJob['job_name'],
+            date('F j, Y g:i A', strtotime((string)$activeJob['created_at']))
+        );
+    }
+} catch (Exception $e) {
+    $activeJobSummary = '';
+}
 
 function normalizeSemester($value) {
     $semester = trim((string)($value ?? ''));
@@ -189,26 +211,55 @@ foreach ($subjects as $s) {
 }
 $available_subject_codes = array_fill_keys(array_keys($subject_by_code), true);
 
-// Instructor -> assigned subject codes (from instructor_specializations table)
+// Instructor -> assigned subject codes from Manage Subjects assignments,
+// then extended with instructor specializations as fallback/extra teachable subjects.
 $instructor_subject_codes = [];
-$stmt = $pdo->query("
-    SELECT ism.instructor_id, s.specialization_name
-    FROM instructor_specializations ism
-    JOIN specializations s ON ism.specialization_id = s.id
-    ORDER BY ism.instructor_id, ism.priority
-");
-foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-    $inst_id = (int) $row['instructor_id'];
-    $code = strtoupper(trim((string) $row['specialization_name']));
-    if ($code === '') {
-        continue;
+try {
+    $stmt = $pdo->query("
+        SELECT sia.instructor_id, sub.subject_code
+        FROM subject_instructor_assignments sia
+        JOIN subjects sub ON sia.subject_id = sub.id
+        ORDER BY sia.instructor_id, sia.assignment_slot, sub.subject_code
+    ");
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $inst_id = (int) $row['instructor_id'];
+        $code = strtoupper(trim((string) $row['subject_code']));
+        if ($code === '') {
+            continue;
+        }
+        if (!isset($instructor_subject_codes[$inst_id])) {
+            $instructor_subject_codes[$inst_id] = [];
+        }
+        if (!in_array($code, $instructor_subject_codes[$inst_id], true)) {
+            $instructor_subject_codes[$inst_id][] = $code;
+        }
     }
-    if (!isset($instructor_subject_codes[$inst_id])) {
-        $instructor_subject_codes[$inst_id] = [];
+} catch (Exception $e) {
+    // Keep the page usable if the assignment table is not present yet.
+}
+
+try {
+    $stmt = $pdo->query("
+        SELECT ism.instructor_id, s.specialization_name
+        FROM instructor_specializations ism
+        JOIN specializations s ON ism.specialization_id = s.id
+        ORDER BY ism.instructor_id, ism.priority
+    ");
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $inst_id = (int) $row['instructor_id'];
+        $code = strtoupper(trim((string) $row['specialization_name']));
+        if ($code === '') {
+            continue;
+        }
+        if (!isset($instructor_subject_codes[$inst_id])) {
+            $instructor_subject_codes[$inst_id] = [];
+        }
+        if (!in_array($code, $instructor_subject_codes[$inst_id], true)) {
+            $instructor_subject_codes[$inst_id][] = $code;
+        }
     }
-    if (!in_array($code, $instructor_subject_codes[$inst_id], true)) {
-        $instructor_subject_codes[$inst_id][] = $code;
-    }
+} catch (Exception $e) {
+    // Specializations are optional fallback data.
 }
 
 /* 
@@ -225,6 +276,9 @@ $all_time_slots = $pdo->query("
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['generate_schedule'])) {
+        if ($activeJobSummary !== '') {
+            $error = $activeJobSummary . ' Please wait for it to finish before generating a new schedule.';
+        } else {
 
         $job_name = $_POST['job_name'] ?? 'Schedule Generation ' . date('Y-m-d H:i:s');
         $schedule_mode = normalizeScheduleMode($_POST['schedule_mode'] ?? 'single');
@@ -381,6 +435,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $message = "Schedule generation job '{$job_name}' has been started.";
         }
+        }
     }
 }
 ?>
@@ -423,6 +478,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <div class="error"><?= $error ?></div>
 <?php endif; ?>
 
+<?php if ($activeJobSummary): ?>
+    <div class="error"><?php echo htmlspecialchars($activeJobSummary); ?> Please wait for it to finish before starting another schedule generation.</div>
+<?php endif; ?>
+
 <form method="POST" class="schedule-form">
 
 <!-- JOB INFO -->
@@ -456,6 +515,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </div>
 
     <div class="form-group">
+        <label>Semester</label>
+        <select name="semester" id="semester_select">
+            <option value="1st Semester" <?php echo $selected_semester === '1st Semester' ? 'selected' : ''; ?>>1st Semester</option>
+            <option value="2nd Semester" <?php echo $selected_semester === '2nd Semester' ? 'selected' : ''; ?>>2nd Semester</option>
+            <option value="Summer" <?php echo $selected_semester === 'Summer' ? 'selected' : ''; ?>>Summer</option>
+        </select>
+    </div>
+
+    <div class="form-group">
         <label>Number of Blocks</label>
         <select name="num_sections">
             <?php for ($i = 1; $i <= 10; $i++): ?>
@@ -475,15 +543,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     <?php echo htmlspecialchars($program_option); ?>
                 </option>
             <?php endforeach; ?>
-        </select>
-    </div>
-
-    <div class="form-group">
-        <label>Semester</label>
-        <select name="semester" id="semester_select">
-            <option value="1st Semester" <?php echo $selected_semester === '1st Semester' ? 'selected' : ''; ?>>1st Semester</option>
-            <option value="2nd Semester" <?php echo $selected_semester === '2nd Semester' ? 'selected' : ''; ?>>2nd Semester</option>
-            <option value="Summer" <?php echo $selected_semester === 'Summer' ? 'selected' : ''; ?>>Summer</option>
         </select>
     </div>
 </div>

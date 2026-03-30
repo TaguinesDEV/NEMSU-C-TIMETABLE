@@ -11,6 +11,7 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'program_chair') {
 $pdo = getDB();
 $message = '';
 $error = '';
+$activeJobSummary = '';
 
 function normalizeSemester($value) {
     $semester = trim((string)($value ?? ''));
@@ -66,6 +67,28 @@ if (!$programChair) {
 }
 
 $program_id = $programChair['program_id'];
+try {
+    $activeJobStmt = $pdo->prepare("
+        SELECT job_name, status, created_at
+        FROM schedule_jobs
+        WHERE program_id = ?
+          AND status IN ('pending', 'processing')
+        ORDER BY created_at DESC
+        LIMIT 1
+    ");
+    $activeJobStmt->execute([$program_id]);
+    $activeJob = $activeJobStmt->fetch(PDO::FETCH_ASSOC);
+    if ($activeJob) {
+        $activeJobSummary = sprintf(
+            '%s job "%s" started on %s is still active.',
+            ucfirst((string)$activeJob['status']),
+            (string)$activeJob['job_name'],
+            date('F j, Y g:i A', strtotime((string)$activeJob['created_at']))
+        );
+    }
+} catch (Exception $e) {
+    $activeJobSummary = '';
+}
 
 // Fetch data for dropdowns - include all instructors so cross-program sharing is possible
 $instructors = $pdo->prepare("
@@ -168,6 +191,9 @@ $all_time_slots = $pdo->query("
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (isset($_POST['generate_schedule'])) {
+        if ($activeJobSummary !== '') {
+            $error = $activeJobSummary . ' Please wait for it to finish before generating a new schedule.';
+        } else {
 
         $job_name = $_POST['job_name'] ?? 'Schedule Generation ' . date('Y-m-d H:i:s');
         $schedule_mode = $_POST['schedule_mode'] ?? 'single';
@@ -307,6 +333,7 @@ $four_day_pattern = $mirror_mode !== 'none';
 
             $message = "Schedule generation job '{$job_name}' has been started.";
         }
+        }
     }
 }
 ?>
@@ -351,6 +378,10 @@ $four_day_pattern = $mirror_mode !== 'none';
 
 <?php if ($error): ?>
     <div class="error"><?= $error ?></div>
+<?php endif; ?>
+
+<?php if ($activeJobSummary): ?>
+    <div class="error"><?php echo htmlspecialchars($activeJobSummary); ?> Please wait for it to finish before starting another schedule generation.</div>
 <?php endif; ?>
 
 <form method="POST" class="schedule-form">

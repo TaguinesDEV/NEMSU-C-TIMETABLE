@@ -28,6 +28,15 @@ try {
     if (!isset($subjectColumns['lab_hours'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_hours DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER lecture_hours");
     }
+    if (!isset($subjectColumns['meetings_per_week'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN meetings_per_week TINYINT NOT NULL DEFAULT 2 AFTER lab_hours");
+    }
+    if (!isset($subjectColumns['lecture_minutes_per_meeting'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lecture_minutes_per_meeting INT NOT NULL DEFAULT 0 AFTER meetings_per_week");
+    }
+    if (!isset($subjectColumns['lab_minutes_per_meeting'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_minutes_per_meeting INT NOT NULL DEFAULT 0 AFTER lecture_minutes_per_meeting");
+    }
     if (!isset($subjectColumns['semester'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN semester ENUM('1st Semester','2nd Semester','Summer') NOT NULL DEFAULT '1st Semester' AFTER subject_type");
     } else {
@@ -49,6 +58,32 @@ try {
 try {
     $pdo->exec("
         UPDATE subjects
+        SET meetings_per_week = CASE
+                WHEN COALESCE(meetings_per_week, 0) <= 0 THEN
+                    CASE WHEN LOWER(COALESCE(semester, '')) = 'summer' THEN 1 ELSE 2 END
+                ELSE meetings_per_week
+            END,
+            lecture_minutes_per_meeting = CASE
+                WHEN COALESCE(lecture_minutes_per_meeting, 0) > 0 THEN lecture_minutes_per_meeting
+                WHEN COALESCE(lab_minutes_per_meeting, 0) > 0 AND COALESCE(lecture_hours, 0) > 0 THEN ROUND((COALESCE(lecture_hours, 0) * 60) / GREATEST(COALESCE(meetings_per_week, 2), 1))
+                WHEN COALESCE(lecture_hours, 0) > 0 THEN ROUND((COALESCE(lecture_hours, 0) * 60) / GREATEST(COALESCE(meetings_per_week, 2), 1))
+                WHEN COALESCE(hours_per_week, 0) > 0 AND COALESCE(lab_hours, 0) <= 0 THEN ROUND((COALESCE(hours_per_week, 0) * 60) / GREATEST(COALESCE(meetings_per_week, 2), 1))
+                ELSE lecture_minutes_per_meeting
+            END,
+            lab_minutes_per_meeting = CASE
+                WHEN COALESCE(lab_minutes_per_meeting, 0) > 0 THEN lab_minutes_per_meeting
+                WHEN COALESCE(lecture_hours, 0) = 2.00 AND COALESCE(lab_hours, 0) = 3.00 THEN 145
+                WHEN COALESCE(lab_hours, 0) > 0 THEN ROUND((COALESCE(lab_hours, 0) * 60) / GREATEST(COALESCE(meetings_per_week, 2), 1))
+                ELSE lab_minutes_per_meeting
+            END
+    ");
+} catch (Exception $e) {
+    // Keep the page usable even if legacy minute conversion cannot run here.
+}
+
+try {
+    $pdo->exec("
+        UPDATE subjects
         SET semester = '1st Semester'
         WHERE semester IS NULL OR semester = '' OR semester NOT IN ('1st Semester','2nd Semester','Summer')
     ");
@@ -56,8 +91,49 @@ try {
     // Keep the page usable even if legacy cleanup cannot run here.
 }
 
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS subject_instructor_assignments (
+            subject_id INT NOT NULL,
+            assignment_slot TINYINT NOT NULL DEFAULT 1,
+            instructor_id INT NOT NULL,
+            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (subject_id, assignment_slot),
+            UNIQUE KEY uq_subject_instructor_assignment_pair (subject_id, instructor_id),
+            CONSTRAINT fk_subject_instructor_assignment_subject
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+            CONSTRAINT fk_subject_instructor_assignment_instructor
+                FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
+    ");
+} catch (Exception $e) {
+    // Continue page load even if auto-migration is not allowed in this environment.
+}
+
+try {
+    $assignmentColumns = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM subject_instructor_assignments")->fetchAll(PDO::FETCH_ASSOC) as $col) {
+        $assignmentColumns[$col['Field']] = $col;
+    }
+    if (!isset($assignmentColumns['assignment_slot'])) {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments ADD COLUMN assignment_slot TINYINT NOT NULL DEFAULT 1 AFTER subject_id");
+    }
+    try {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments DROP PRIMARY KEY, ADD PRIMARY KEY (subject_id, assignment_slot)");
+    } catch (Exception $e) {
+        // Primary key already updated or cannot be altered in this environment.
+    }
+    try {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments ADD UNIQUE KEY uq_subject_instructor_assignment_pair (subject_id, instructor_id)");
+    } catch (Exception $e) {
+        // Unique key already exists.
+    }
+} catch (Exception $e) {
+    // Keep the page usable even if assignment table adjustments cannot run here.
+}
+
 function defaultHoursFromSubjectType($type) {
-    return strtolower((string)$type) === 'minor' ? 1.50 : 4.25;
+    return strtolower((string)$type) === 'minor' ? 3.00 : 4.00;
 }
 
 function normalizeHoursPerWeek($rawHours, $subjectType) {
@@ -77,6 +153,74 @@ function normalizeNonNegativeHours($rawHours) {
         $hours = 0;
     }
     return round($hours, 2);
+}
+
+function normalizeMinutes($rawMinutes) {
+    $minutes = (int)($rawMinutes ?? 0);
+    if ($minutes < 0) {
+        $minutes = 0;
+    }
+    return $minutes;
+}
+
+function normalizeMeetingsPerWeek($rawMeetings) {
+    $meetings = (int)($rawMeetings ?? 2);
+    if ($meetings < 1) {
+        return 1;
+    }
+    if ($meetings > 7) {
+        return 7;
+    }
+    return $meetings;
+}
+
+function minutesToDecimalHours($minutes) {
+    return round(((int)$minutes) / 60, 2);
+}
+
+function formatMinutesAsClock($minutes) {
+    $minutes = max(0, (int)$minutes);
+    $hours = intdiv($minutes, 60);
+    $mins = $minutes % 60;
+    return sprintf('%d:%02d', $hours, $mins);
+}
+
+function computeSubjectTimeValues($subjectType, $meetingsPerWeek, $lectureMinutesPerMeeting, $labMinutesPerMeeting, $fallbackHoursPerWeek = null) {
+    $subjectType = strtolower((string)$subjectType);
+    $meetingsPerWeek = normalizeMeetingsPerWeek($meetingsPerWeek);
+    $lectureMinutesPerMeeting = normalizeMinutes($lectureMinutesPerMeeting);
+    $labMinutesPerMeeting = normalizeMinutes($labMinutesPerMeeting);
+
+    if ($subjectType === 'minor') {
+        if ($lectureMinutesPerMeeting <= 0) {
+            $lectureMinutesPerMeeting = 90;
+        }
+        $labMinutesPerMeeting = 0;
+    } elseif ($lectureMinutesPerMeeting <= 0 && $labMinutesPerMeeting <= 0) {
+        $lectureMinutesPerMeeting = 120;
+    }
+
+    $weeklyLectureMinutes = $lectureMinutesPerMeeting * $meetingsPerWeek;
+    $weeklyLabMinutes = $labMinutesPerMeeting * $meetingsPerWeek;
+    $weeklyTotalMinutes = $weeklyLectureMinutes + $weeklyLabMinutes;
+
+    if ($weeklyTotalMinutes <= 0 && $fallbackHoursPerWeek !== null && $fallbackHoursPerWeek !== '') {
+        $weeklyTotalMinutes = max(0, (int)round(((float)$fallbackHoursPerWeek) * 60));
+        $weeklyLectureMinutes = $weeklyTotalMinutes;
+        $lectureMinutesPerMeeting = (int)round($weeklyLectureMinutes / max($meetingsPerWeek, 1));
+        $weeklyLabMinutes = 0;
+        $labMinutesPerMeeting = 0;
+    }
+
+    return [
+        'meetings_per_week' => $meetingsPerWeek,
+        'lecture_minutes_per_meeting' => $lectureMinutesPerMeeting,
+        'lab_minutes_per_meeting' => $labMinutesPerMeeting,
+        'hours_per_week' => minutesToDecimalHours($weeklyTotalMinutes),
+        'lecture_hours' => minutesToDecimalHours($weeklyLectureMinutes),
+        'lab_hours' => minutesToDecimalHours($weeklyLabMinutes),
+        'weekly_total_minutes' => $weeklyTotalMinutes,
+    ];
 }
 
 function normalizeSemester($rawSemester) {
@@ -105,12 +249,144 @@ function normalizeProgramScope($rawProgramId, $programNameById) {
     return [$programId, $programNameById[$programId]];
 }
 
+function normalizeProgramLabel($value) {
+    return strtolower((string)preg_replace('/[^A-Za-z0-9]+/', '', (string)$value));
+}
+
+function resolveProgramCodeFromValue($value) {
+    $normalized = normalizeProgramLabel($value);
+    $map = [
+        'cs' => 'CS',
+        'computerscience' => 'CS',
+        'bscomputerscience' => 'CS',
+        'bachelorofscienceincomputerscience' => 'CS',
+        'it' => 'IT',
+        'informationtechnology' => 'IT',
+        'bsinformationtechnology' => 'IT',
+        'bachelorofscienceininformationtechnology' => 'IT',
+        'cpe' => 'CPE',
+        'computerengineering' => 'CPE',
+        'bscomputerengineering' => 'CPE',
+        'bachelorofscienceincomputerengineering' => 'CPE',
+        'bscpe' => 'CPE',
+        'bscpe' => 'CPE',
+    ];
+    return $map[$normalized] ?? 'OTHER';
+}
+
+function resolveSubjectProgramCode($subject) {
+    $programSignals = [
+        $subject['department'] ?? '',
+        $subject['linked_program_name'] ?? '',
+        $subject['program_display_name'] ?? '',
+    ];
+    foreach ($programSignals as $signal) {
+        $code = resolveProgramCodeFromValue($signal);
+        if ($code !== 'OTHER') {
+            return $code;
+        }
+    }
+    return resolveProgramCodeFromValue($subject['subject_code'] ?? '');
+}
+
+function getProgramDisplayNameFromCode($value) {
+    $normalized = strtoupper(trim((string)$value));
+    $map = [
+        'CS' => 'Computer Science',
+        'IT' => 'Information Technology',
+        'CPE' => 'Computer Engineering',
+    ];
+    return $map[$normalized] ?? trim((string)$value);
+}
+
+function normalizeInstructorAssignments(array $rawInstructorValues, array $instructorNameById, array $instructorIdByName): array {
+    $normalized = [];
+    foreach ($rawInstructorValues as $rawInstructorValue) {
+        $rawInstructorValue = trim((string)$rawInstructorValue);
+        if ($rawInstructorValue === '') {
+            continue;
+        }
+        $instructorId = ctype_digit($rawInstructorValue)
+            ? (int)$rawInstructorValue
+            : (int)($instructorIdByName[strtoupper($rawInstructorValue)] ?? 0);
+        if ($instructorId <= 0 || !isset($instructorNameById[$instructorId])) {
+            continue;
+        }
+        if (!in_array($instructorId, $normalized, true)) {
+            $normalized[] = $instructorId;
+        }
+        if (count($normalized) >= 4) {
+            break;
+        }
+    }
+    return $normalized;
+}
+
 // Fetch departments for dropdown
 $departments = $pdo->query("SELECT * FROM departments ORDER BY dept_name")->fetchAll();
 $programs = $pdo->query("SELECT id, program_name, program_code FROM programs ORDER BY program_name")->fetchAll(PDO::FETCH_ASSOC);
 $programNameById = [];
 foreach ($programs as $programRow) {
     $programNameById[(int)$programRow['id']] = (string)$programRow['program_name'];
+}
+$instructors = $pdo->query("
+    SELECT i.id, u.full_name
+    FROM instructors i
+    JOIN users u ON i.user_id = u.id
+    ORDER BY u.full_name
+")->fetchAll(PDO::FETCH_ASSOC);
+$instructorNameById = [];
+$instructorIdByName = [];
+foreach ($instructors as $instructorRow) {
+    $instructorId = (int)$instructorRow['id'];
+    $instructorName = (string)$instructorRow['full_name'];
+    $instructorNameById[$instructorId] = $instructorName;
+    $instructorIdByName[strtoupper(trim($instructorName))] = $instructorId;
+}
+$quickProgramTargets = [
+    'Computer Science(CS)' => [
+        'code' => 'CS',
+        'aliases' => ['cs', 'computerscience', 'bscomputerscience', 'bscs'],
+        'display_html' => 'Computer Science (CS)',
+    ],
+    'Information Technology (IT)' => [
+        'code' => 'IT',
+        'aliases' => ['it', 'informationtechnology', 'bsinformationtechnology', 'bsit'],
+        'display_html' => 'Information Technology (IT)',
+    ],
+    'Computer Engineering(CPE)' => [
+        'code' => 'CPE',
+        'aliases' => ['cpe', 'computerengineering', 'bscomputerengineering', 'bscpe'],
+        'display_html' => 'Computer Engineering (CPE)',
+    ],
+];
+$quickProgramButtons = [];
+foreach ($quickProgramTargets as $label => $config) {
+    $aliases = $config['aliases'];
+    $matchedProgramId = null;
+    foreach ($programs as $programRow) {
+        $normalizedName = normalizeProgramLabel($programRow['program_name'] ?? '');
+        $normalizedCode = normalizeProgramLabel($programRow['program_code'] ?? '');
+        if (in_array($normalizedName, $aliases, true) || in_array($normalizedCode, $aliases, true)) {
+            $matchedProgramId = (int)$programRow['id'];
+            break;
+        }
+    }
+    $quickProgramButtons[] = [
+        'label' => $label,
+        'code' => $config['code'],
+        'id' => $matchedProgramId,
+        'aliases' => $aliases,
+        'display_html' => $config['display_html'],
+    ];
+}
+$selectedProgramCode = strtoupper(trim((string)($_GET['program'] ?? '')));
+if (!in_array($selectedProgramCode, ['CS', 'IT', 'CPE'], true)) {
+    $selectedProgramCode = '';
+}
+$selectedSemester = trim((string)($_GET['semester'] ?? ''));
+if (!in_array($selectedSemester, ['1st Semester', '2nd Semester'], true)) {
+    $selectedSemester = '';
 }
 
 // Handle Add/Edit/Delete operations
@@ -127,24 +403,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
-        $lecture_hours = normalizeNonNegativeHours($_POST['lecture_hours'] ?? 0);
-        $lab_hours = normalizeNonNegativeHours($_POST['lab_hours'] ?? 0);
-        if ($subject_type === 'major') {
-            $hours_per_week = round($lecture_hours + $lab_hours, 2);
-            if ($hours_per_week <= 0) {
-                $lecture_hours = 2.00;
-                $lab_hours = 2.25;
-                $hours_per_week = 4.25;
-            }
-        } else {
-            $hours_per_week = normalizeHoursPerWeek($_POST['hours_per_week'] ?? null, $subject_type);
-            $lecture_hours = $hours_per_week;
-            $lab_hours = 0.00;
-        }
+        $timeValues = computeSubjectTimeValues(
+            $subject_type,
+            $_POST['meetings_per_week'] ?? 2,
+            $_POST['lecture_minutes_per_meeting'] ?? 0,
+            $_POST['lab_minutes_per_meeting'] ?? 0,
+            $_POST['hours_per_week'] ?? null
+        );
         
         try {
-            $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, department, program_id, subject_type, semester, year_level, prerequisites, hours_per_week, lecture_hours, lab_hours) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([$subject_code, $subject_name, $credits, $department, $program_id, $subject_type, $semester, $year_level, $prerequisites, $hours_per_week, $lecture_hours, $lab_hours]);
+            $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, department, program_id, subject_type, semester, year_level, prerequisites, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->execute([
+                $subject_code,
+                $subject_name,
+                $credits,
+                $department,
+                $program_id,
+                $subject_type,
+                $semester,
+                $year_level,
+                $prerequisites,
+                $timeValues['hours_per_week'],
+                $timeValues['lecture_hours'],
+                $timeValues['lab_hours'],
+                $timeValues['meetings_per_week'],
+                $timeValues['lecture_minutes_per_meeting'],
+                $timeValues['lab_minutes_per_meeting'],
+            ]);
             $message = "Subject added successfully!";
         } catch (Exception $e) {
             $error = "Error adding subject: " . $e->getMessage();
@@ -164,24 +449,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
-        $lecture_hours = normalizeNonNegativeHours($_POST['lecture_hours'] ?? 0);
-        $lab_hours = normalizeNonNegativeHours($_POST['lab_hours'] ?? 0);
-        if ($subject_type === 'major') {
-            $hours_per_week = round($lecture_hours + $lab_hours, 2);
-            if ($hours_per_week <= 0) {
-                $lecture_hours = 2.00;
-                $lab_hours = 2.25;
-                $hours_per_week = 4.25;
-            }
-        } else {
-            $hours_per_week = normalizeHoursPerWeek($_POST['hours_per_week'] ?? null, $subject_type);
-            $lecture_hours = $hours_per_week;
-            $lab_hours = 0.00;
-        }
+        $timeValues = computeSubjectTimeValues(
+            $subject_type,
+            $_POST['meetings_per_week'] ?? 2,
+            $_POST['lecture_minutes_per_meeting'] ?? 0,
+            $_POST['lab_minutes_per_meeting'] ?? 0,
+            $_POST['hours_per_week'] ?? null
+        );
         
         try {
-            $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ? WHERE id = ?");
-            $stmt->execute([$subject_code, $subject_name, $credits, $department, $program_id, $subject_type, $semester, $year_level, $prerequisites, $hours_per_week, $lecture_hours, $lab_hours, $id]);
+            $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
+            $stmt->execute([
+                $subject_code,
+                $subject_name,
+                $credits,
+                $department,
+                $program_id,
+                $subject_type,
+                $semester,
+                $year_level,
+                $prerequisites,
+                $timeValues['hours_per_week'],
+                $timeValues['lecture_hours'],
+                $timeValues['lab_hours'],
+                $timeValues['meetings_per_week'],
+                $timeValues['lecture_minutes_per_meeting'],
+                $timeValues['lab_minutes_per_meeting'],
+                $id
+            ]);
             $message = "Subject updated successfully!";
         } catch (Exception $e) {
             $error = "Error updating subject: " . $e->getMessage();
@@ -224,19 +519,129 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Error adding department: " . $e->getMessage();
         }
     }
+
+    if (isset($_POST['assign_instructor'])) {
+        $subjectId = (int)($_POST['subject_id'] ?? 0);
+        $instructorIds = normalizeInstructorAssignments($_POST['instructor_ids'] ?? [], $instructorNameById, $instructorIdByName);
+
+        if ($subjectId <= 0) {
+            $error = "Please choose a valid subject.";
+        } else {
+            try {
+                $pdo->beginTransaction();
+                $deleteStmt = $pdo->prepare("DELETE FROM subject_instructor_assignments WHERE subject_id = ?");
+                $deleteStmt->execute([$subjectId]);
+
+                if (!empty($instructorIds)) {
+                    $insertStmt = $pdo->prepare("
+                        INSERT INTO subject_instructor_assignments (subject_id, assignment_slot, instructor_id)
+                        VALUES (?, ?, ?)
+                    ");
+                    foreach ($instructorIds as $index => $instructorId) {
+                        $insertStmt->execute([$subjectId, $index + 1, $instructorId]);
+                    }
+                }
+
+                $pdo->commit();
+                $message = "Instructor assignment updated successfully!";
+            } catch (Exception $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $error = "Error assigning instructor: " . $e->getMessage();
+            }
+        }
+    }
 }
 
 // Fetch all subjects
 $subjects = $pdo->query("
     SELECT s.*,
            p.program_name AS linked_program_name,
-           COALESCE(p.program_name, s.department, 'All Programs') AS program_display_name,
+           COALESCE(NULLIF(s.department, ''), p.program_name, 'All Programs') AS raw_program_name,
            COALESCE(NULLIF(s.semester, ''), '1st Semester') AS normalized_semester,
            COALESCE(subject_type, 'major') AS subject_type
     FROM subjects s
     LEFT JOIN programs p ON s.program_id = p.id
-    ORDER BY program_display_name, subject_code
+    ORDER BY raw_program_name, subject_code
 ")->fetchAll();
+$subjectAssignments = [];
+$assignmentRows = $pdo->query("
+    SELECT sia.subject_id, sia.assignment_slot, sia.instructor_id, u.full_name
+    FROM subject_instructor_assignments sia
+    JOIN instructors ai ON sia.instructor_id = ai.id
+    JOIN users u ON ai.user_id = u.id
+    ORDER BY sia.subject_id, sia.assignment_slot, u.full_name
+")->fetchAll(PDO::FETCH_ASSOC);
+foreach ($assignmentRows as $assignmentRow) {
+    $subjectId = (int)($assignmentRow['subject_id'] ?? 0);
+    if ($subjectId <= 0) {
+        continue;
+    }
+    if (!isset($subjectAssignments[$subjectId])) {
+        $subjectAssignments[$subjectId] = [
+            'ids' => [],
+            'names' => [],
+        ];
+    }
+    $subjectAssignments[$subjectId]['ids'][] = (int)($assignmentRow['instructor_id'] ?? 0);
+    $subjectAssignments[$subjectId]['names'][] = (string)($assignmentRow['full_name'] ?? '');
+}
+foreach ($subjects as &$subject) {
+    $meetingCount = normalizeMeetingsPerWeek($subject['meetings_per_week'] ?? 2);
+    $lectureMinutesPerMeeting = normalizeMinutes($subject['lecture_minutes_per_meeting'] ?? 0);
+    $labMinutesPerMeeting = normalizeMinutes($subject['lab_minutes_per_meeting'] ?? 0);
+    if ($lectureMinutesPerMeeting <= 0 && $labMinutesPerMeeting <= 0) {
+        $fallback = computeSubjectTimeValues(
+            $subject['subject_type'] ?? 'major',
+            $meetingCount,
+            0,
+            0,
+            $subject['hours_per_week'] ?? 0
+        );
+        $meetingCount = $fallback['meetings_per_week'];
+        $lectureMinutesPerMeeting = $fallback['lecture_minutes_per_meeting'];
+        $labMinutesPerMeeting = $fallback['lab_minutes_per_meeting'];
+    }
+    $subject['meetings_per_week'] = $meetingCount;
+    $subject['lecture_minutes_per_meeting'] = $lectureMinutesPerMeeting;
+    $subject['lab_minutes_per_meeting'] = $labMinutesPerMeeting;
+    $subject['meeting_pattern_text'] = trim(implode(' + ', array_values(array_filter([
+        $lectureMinutesPerMeeting > 0 ? ('Lecture ' . formatMinutesAsClock($lectureMinutesPerMeeting)) : '',
+        $labMinutesPerMeeting > 0 ? ('Laboratory ' . formatMinutesAsClock($labMinutesPerMeeting)) : '',
+    ]))));
+    if ($subject['meeting_pattern_text'] === '') {
+        $subject['meeting_pattern_text'] = formatMinutesAsClock((int)round(((float)($subject['hours_per_week'] ?? 0)) * 60));
+    }
+    $weeklyMinutes = ($lectureMinutesPerMeeting + $labMinutesPerMeeting) * $meetingCount;
+    $subject['weekly_time_text'] = formatMinutesAsClock($weeklyMinutes);
+    $subjectProgramCode = resolveSubjectProgramCode($subject);
+    $subject['resolved_program_code'] = $subjectProgramCode;
+    if (in_array($subjectProgramCode, ['CS', 'IT', 'CPE'], true)) {
+        $subject['program_display_name'] = getProgramDisplayNameFromCode($subjectProgramCode);
+    } elseif (!empty($subject['raw_program_name'])) {
+        $subject['program_display_name'] = $subject['raw_program_name'];
+    } elseif (!empty($subject['linked_program_name'])) {
+        $subject['program_display_name'] = $subject['linked_program_name'];
+    }
+    $assignmentInfo = $subjectAssignments[(int)$subject['id']] ?? ['ids' => [], 'names' => []];
+    $subject['assigned_instructor_ids'] = $assignmentInfo['ids'];
+    $subject['assigned_instructor_names'] = array_values(array_filter($assignmentInfo['names']));
+    $subject['assigned_instructor_names_text'] = !empty($subject['assigned_instructor_names'])
+        ? implode(', ', $subject['assigned_instructor_names'])
+        : 'Unassigned';
+}
+unset($subject);
+if ($selectedProgramCode !== '') {
+    $subjects = array_values(array_filter($subjects, function ($subject) use ($selectedProgramCode) {
+        return ($subject['resolved_program_code'] ?? '') === $selectedProgramCode;
+    }));
+}
+if ($selectedSemester !== '') {
+    $subjects = array_values(array_filter($subjects, function ($subject) use ($selectedSemester) {
+        return ($subject['normalized_semester'] ?? '') === $selectedSemester;
+    }));
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -324,6 +729,12 @@ $subjects = $pdo->query("
             color: #fff;
         }
 
+        .btn-assign {
+            background: linear-gradient(135deg, #0284c7, #38bdf8);
+            border-color: #0369a1;
+            color: #fff;
+        }
+
         .row-actions {
             display: inline-flex;
             align-items: center;
@@ -373,6 +784,133 @@ $subjects = $pdo->query("
             opacity: 0.55;
             cursor: not-allowed;
         }
+
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            margin-bottom: 18px;
+        }
+
+        .action-buttons-left,
+        .action-buttons-right {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .action-buttons button,
+        .action-buttons a {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            line-height: 1.25;
+            text-decoration: none;
+        }
+
+        .btn-program-quick {
+            min-height: 40px;
+            min-width: 170px;
+            padding: 8px 14px;
+            cursor: pointer;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #1e293b;
+            font-size: 14px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .action-buttons .btn-primary,
+        .action-buttons .btn-secondary {
+            min-width: 134px;
+        }
+
+        .btn-filter-all {
+            min-height: 40px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid #cbd5e1;
+            background: #f8fafc;
+            color: #334155;
+            font-size: 14px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .btn-program-quick:hover {
+            background: #f8fafc;
+            border-color: #94a3b8;
+        }
+
+        .btn-program-quick.is-active {
+            box-shadow: inset 0 0 0 1px currentColor;
+        }
+
+        .btn-program-cs {
+            background: #eff6ff;
+            border-color: #bfdbfe;
+            color: #1d4ed8;
+        }
+
+        .btn-program-cs:hover,
+        .btn-program-cs.is-active {
+            background: #dbeafe;
+        }
+
+        .btn-program-it {
+            background: #ecfeff;
+            border-color: #a5f3fc;
+            color: #0f766e;
+        }
+
+        .btn-program-it:hover,
+        .btn-program-it.is-active {
+            background: #cffafe;
+        }
+
+        .btn-program-cpe {
+            background: #f0fdf4;
+            border-color: #bbf7d0;
+            color: #15803d;
+        }
+
+        .btn-program-cpe:hover,
+        .btn-program-cpe.is-active {
+            background: #dcfce7;
+        }
+
+        .btn-filter-all:hover,
+        .btn-filter-all.is-active {
+            background: #e2e8f0;
+            border-color: #94a3b8;
+            color: #0f172a;
+        }
+
+        .btn-semester-filter {
+            min-height: 40px;
+            padding: 8px 14px;
+            border-radius: 8px;
+            border: 1px solid #d8b4fe;
+            background: #faf5ff;
+            color: #7c3aed;
+            font-size: 14px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .btn-semester-filter:hover,
+        .btn-semester-filter.is-active {
+            background: #f3e8ff;
+            border-color: #c084fc;
+            color: #6d28d9;
+        }
+
     </style>
 </head>
 <body>
@@ -414,10 +952,45 @@ $subjects = $pdo->query("
         </div>
 
         <div class="action-buttons">
-            <button class="btn-primary" onclick="openModal('addSubjectModal')">➕ Add New Subject</button>
-            <button class="btn-secondary" onclick="openModal('addDepartmentModal')">🏢 Add Program</button>
+            <div class="action-buttons-left">
+                <button type="button" class="btn-primary" onclick="openAddSubjectModal()">Add New Subject</button>
+                <button type="button" class="btn-secondary" onclick="openModal('addDepartmentModal')">Add Program</button>
+                <a
+                    href="manage_subjects.php<?php echo $selectedSemester !== '' ? '?semester=' . urlencode($selectedSemester) : ''; ?>"
+                    class="btn-filter-all<?php echo $selectedProgramCode === '' ? ' is-active' : ''; ?>"
+                >
+                    Show all
+                </a>
+                <?php foreach ($quickProgramButtons as $quickProgramButton): ?>
+                <a
+                    href="?program=<?php echo urlencode($quickProgramButton['code']); ?><?php echo $selectedSemester !== '' ? '&semester=' . urlencode($selectedSemester) : ''; ?>"
+                    class="btn-program-quick btn-program-<?php echo strtolower($quickProgramButton['code']); ?><?php echo $selectedProgramCode === $quickProgramButton['code'] ? ' is-active' : ''; ?>"
+                >
+                    <?php echo $quickProgramButton['display_html']; ?>
+                </a>
+                <?php endforeach; ?>
+            </div>
+            <div class="action-buttons-right">
+                <a
+                    href="manage_subjects.php<?php echo $selectedProgramCode !== '' ? '?program=' . urlencode($selectedProgramCode) : ''; ?>"
+                    class="btn-semester-filter<?php echo $selectedSemester === '' ? ' is-active' : ''; ?>"
+                >
+                    All Semesters
+                </a>
+                <a
+                    href="?<?php echo http_build_query(array_filter(['program' => $selectedProgramCode ?: null, 'semester' => '1st Semester'])); ?>"
+                    class="btn-semester-filter<?php echo $selectedSemester === '1st Semester' ? ' is-active' : ''; ?>"
+                >
+                    1st Semester
+                </a>
+                <a
+                    href="?<?php echo http_build_query(array_filter(['program' => $selectedProgramCode ?: null, 'semester' => '2nd Semester'])); ?>"
+                    class="btn-semester-filter<?php echo $selectedSemester === '2nd Semester' ? ' is-active' : ''; ?>"
+                >
+                    2nd Semester
+                </a>
+            </div>
         </div>
-        
         <!-- Subjects Table -->
         <table class="data-table">
             <thead>
@@ -425,11 +998,13 @@ $subjects = $pdo->query("
                     <th>Subject Code</th>
                     <th>Subject Name</th>
                     <th>Program</th>
+                    <th>Assigned Instructor</th>
                     <th>Year</th>
                     <th>Semester</th>
                     <th>Type</th>
                     <th>Credits</th>
-                    <th>Hours/Week</th>
+                    <th>Meeting Pattern</th>
+                    <th>Weekly Time</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -439,19 +1014,32 @@ $subjects = $pdo->query("
                     $subject['subject_code'] . ' ' .
                     $subject['subject_name'] . ' ' .
                     ($subject['program_display_name'] ?? $subject['department']) . ' ' .
+                    ($subject['assigned_instructor_names_text'] ?? '') . ' ' .
                     ($subject['semester'] ?? '') . ' ' .
-                    $subject['subject_type']
-                )); ?>">
+                    $subject['subject_type'] . ' ' .
+                    ($subject['meeting_pattern_text'] ?? '') . ' ' .
+                    ($subject['weekly_time_text'] ?? '')
+                )); ?>"
+                    data-program-code="<?php echo htmlspecialchars(resolveSubjectProgramCode($subject)); ?>">
                     <td><?php echo htmlspecialchars($subject['subject_code']); ?></td>
                     <td><?php echo htmlspecialchars($subject['subject_name']); ?></td>
                     <td><?php echo htmlspecialchars($subject['program_display_name'] ?? $subject['department']); ?></td>
+                    <td><?php echo htmlspecialchars($subject['assigned_instructor_names_text']); ?></td>
                     <td><?php echo htmlspecialchars((string)($subject['year_level'] ?? 1)); ?></td>
                     <td><?php echo htmlspecialchars($subject['normalized_semester'] ?? '1st Semester'); ?></td>
                     <td><?php echo ucfirst(htmlspecialchars($subject['subject_type'] ?? 'major')); ?></td>
                     <td><?php echo $subject['credits']; ?></td>
-                    <td><?php echo number_format((float)$subject['hours_per_week'], 2); ?></td>
+                    <td><?php echo htmlspecialchars($subject['meeting_pattern_text']); ?></td>
+                    <td><?php echo htmlspecialchars($subject['weekly_time_text']); ?></td>
                     <td>
                         <div class="row-actions">
+                            <button
+                                type="button"
+                                class="btn-icon btn-assign"
+                                onclick='openAssignInstructorModal(<?php echo (int)$subject["id"]; ?>, <?php echo json_encode($subject["subject_code"] . " - " . $subject["subject_name"], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>, <?php echo json_encode($subject["assigned_instructor_ids"], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>)'
+                            >
+                                <i class="fas fa-user-plus"></i> Choose Instructor
+                            </button>
                             <button class="btn-icon btn-edit" onclick="editSubject(<?php echo $subject['id']; ?>)"><i class="fas fa-edit"></i> Edit</button>
                             <form method="POST" onsubmit="return confirm('Are you sure you want to delete this subject?')">
                                 <input type="hidden" name="subject_id" value="<?php echo $subject['id']; ?>">
@@ -531,18 +1119,22 @@ $subjects = $pdo->query("
 
                 <div id="add_major_breakdown">
                     <div class="form-group">
-                        <label for="lecture_hours">Lecture Hours:</label>
-                        <input type="number" id="lecture_hours" name="lecture_hours" min="0" max="10" step="0.25" value="2.0">
+                        <label for="meetings_per_week">Meetings Per Week:</label>
+                        <input type="number" id="meetings_per_week" name="meetings_per_week" min="1" max="7" step="1" value="2">
                     </div>
                     <div class="form-group">
-                        <label for="lab_hours">Lab Hours:</label>
-                        <input type="number" id="lab_hours" name="lab_hours" min="0" max="10" step="0.25" value="2.25">
+                        <label for="lecture_minutes_per_meeting">Lecture Per Meeting (minutes):</label>
+                        <input type="number" id="lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" min="0" max="600" step="5" value="120">
+                    </div>
+                    <div class="form-group">
+                        <label for="lab_minutes_per_meeting">Laboratory Per Meeting (minutes):</label>
+                        <input type="number" id="lab_minutes_per_meeting" name="lab_minutes_per_meeting" min="0" max="600" step="5" value="0">
                     </div>
                 </div>
                 
                 <div class="form-group">
-                    <label for="hours_per_week">Hours per Week:</label>
-                    <input type="number" id="hours_per_week" name="hours_per_week" min="0.5" max="10" step="0.25" value="4.25" required>
+                    <label for="hours_per_week">Weekly Total:</label>
+                    <input type="text" id="hours_per_week" name="hours_per_week" value="4:00" readonly>
                 </div>
                 
                 <button type="submit" name="add_subject" class="btn-primary">Add Subject</button>
@@ -639,64 +1231,182 @@ $subjects = $pdo->query("
 
                 <div id="edit_major_breakdown">
                     <div class="form-group">
-                        <label for="edit_lecture_hours">Lecture Hours:</label>
-                        <input type="number" id="edit_lecture_hours" name="lecture_hours" min="0" max="10" step="0.25" value="2.0">
+                        <label for="edit_meetings_per_week">Meetings Per Week:</label>
+                        <input type="number" id="edit_meetings_per_week" name="meetings_per_week" min="1" max="7" step="1" value="2">
                     </div>
                     <div class="form-group">
-                        <label for="edit_lab_hours">Lab Hours:</label>
-                        <input type="number" id="edit_lab_hours" name="lab_hours" min="0" max="10" step="0.25" value="2.25">
+                        <label for="edit_lecture_minutes_per_meeting">Lecture Per Meeting (minutes):</label>
+                        <input type="number" id="edit_lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" min="0" max="600" step="5" value="120">
+                    </div>
+                    <div class="form-group">
+                        <label for="edit_lab_minutes_per_meeting">Laboratory Per Meeting (minutes):</label>
+                        <input type="number" id="edit_lab_minutes_per_meeting" name="lab_minutes_per_meeting" min="0" max="600" step="5" value="0">
                     </div>
                 </div>
                 
                 <div class="form-group">
-                    <label for="edit_hours_per_week">Hours per Week:</label>
-                    <input type="number" id="edit_hours_per_week" name="hours_per_week" min="0.5" max="10" step="0.25" required>
+                    <label for="edit_hours_per_week">Weekly Total:</label>
+                    <input type="text" id="edit_hours_per_week" name="hours_per_week" readonly>
                 </div>
                 
                 <button type="submit" name="edit_subject" class="btn-primary">Update Subject</button>
             </form>
         </div>
     </div>
+
+    <div id="assignInstructorModal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal('assignInstructorModal')">&times;</span>
+            <h2>Choose Instructor</h2>
+            <datalist id="assign_instructor_options">
+                <?php foreach ($instructors as $instructor): ?>
+                <option value="<?php echo htmlspecialchars($instructor['full_name']); ?>"></option>
+                <?php endforeach; ?>
+            </datalist>
+            <form method="POST">
+                <input type="hidden" id="assign_subject_id" name="subject_id">
+                <div class="form-group">
+                    <label for="assign_subject_label">Subject:</label>
+                    <input type="text" id="assign_subject_label" readonly>
+                </div>
+                <div class="form-group">
+                    <label for="assign_instructor_id_1">Instructor 1:</label>
+                    <input type="text" id="assign_instructor_id_1" name="instructor_ids[]" list="assign_instructor_options" placeholder="Search instructor name...">
+                </div>
+                <div class="form-group">
+                    <label for="assign_instructor_id_2">Instructor 2:</label>
+                    <input type="text" id="assign_instructor_id_2" name="instructor_ids[]" list="assign_instructor_options" placeholder="Search instructor name...">
+                </div>
+                <div class="form-group">
+                    <label for="assign_instructor_id_3">Instructor 3:</label>
+                    <input type="text" id="assign_instructor_id_3" name="instructor_ids[]" list="assign_instructor_options" placeholder="Search instructor name...">
+                </div>
+                <div class="form-group">
+                    <label for="assign_instructor_id_4">Instructor 4:</label>
+                    <input type="text" id="assign_instructor_id_4" name="instructor_ids[]" list="assign_instructor_options" placeholder="Search instructor name...">
+                </div>
+                <button type="submit" name="assign_instructor" class="btn-primary">Save Instructor</button>
+            </form>
+        </div>
+    </div>
     
     <script>
-        function getHoursBySubjectType(typeValue) {
-            return typeValue === 'minor' ? 1.5 : 4.25;
+        const assignableInstructorsById = <?php echo json_encode(array_map('strval', $instructorNameById), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>;
+
+        function getDefaultSubjectPattern(typeValue) {
+            if (typeValue === 'minor') {
+                return {
+                    meetingsPerWeek: 2,
+                    lectureMinutes: 90,
+                    labMinutes: 0,
+                };
+            }
+            return {
+                meetingsPerWeek: 2,
+                lectureMinutes: 120,
+                labMinutes: 0,
+            };
         }
 
         function updateMajorBreakdownVisibility(typeEl, breakdownWrap, hoursEl) {
             if (!typeEl || !breakdownWrap || !hoursEl) {
                 return;
             }
-            const isMajor = typeEl.value === 'major';
-            breakdownWrap.style.display = isMajor ? 'block' : 'none';
-            hoursEl.readOnly = isMajor;
+            breakdownWrap.style.display = 'block';
+            hoursEl.readOnly = true;
+            const prefix = typeEl.id && typeEl.id.startsWith('edit_') ? 'edit_' : '';
+            const labEl = document.getElementById(`${prefix}lab_minutes_per_meeting`);
+            if (labEl) {
+                labEl.disabled = typeEl.value === 'minor';
+                if (typeEl.value === 'minor') {
+                    labEl.value = '0';
+                }
+            }
         }
 
-        function syncMajorTotal(lectureEl, labEl, hoursEl) {
-            if (!lectureEl || !labEl || !hoursEl) {
-                return;
-            }
-            const lec = parseFloat(lectureEl.value || 0);
-            const lab = parseFloat(labEl.value || 0);
-            const total = (Number.isNaN(lec) ? 0 : lec) + (Number.isNaN(lab) ? 0 : lab);
-            hoursEl.value = total.toFixed(2);
+        function formatClockMinutes(totalMinutes) {
+            const minutes = Math.max(0, parseInt(totalMinutes || 0, 10));
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            return `${hours}:${String(mins).padStart(2, '0')}`;
         }
 
-        function syncHoursDefault(typeEl, hoursEl) {
-            if (!typeEl || !hoursEl) {
+        function syncMajorTotal(meetingsEl, lectureEl, labEl, hoursEl) {
+            if (!meetingsEl || !lectureEl || !labEl || !hoursEl) {
                 return;
             }
-            const current = parseFloat(hoursEl.value);
-            const prevDefault = getHoursBySubjectType(typeEl.dataset.previousType || 'major');
-            // Auto-adjust only if the user still has the previous default.
-            if (Number.isNaN(current) || Math.abs(current - prevDefault) < 0.001) {
-                hoursEl.value = getHoursBySubjectType(typeEl.value).toFixed(2);
+            const meetings = parseInt(meetingsEl.value || 0, 10);
+            const lec = parseInt(lectureEl.value || 0, 10);
+            const lab = parseInt(labEl.value || 0, 10);
+            const total = (Number.isNaN(meetings) ? 0 : meetings) * ((Number.isNaN(lec) ? 0 : lec) + (Number.isNaN(lab) ? 0 : lab));
+            hoursEl.value = formatClockMinutes(total);
+        }
+
+        function syncHoursDefault(typeEl, hoursEl, meetingsEl, lectureEl, labEl) {
+            if (!typeEl || !hoursEl || !meetingsEl || !lectureEl || !labEl) {
+                return;
             }
+            const prevDefault = getDefaultSubjectPattern(typeEl.dataset.previousType || 'major');
+            const currentPatternMatchesPrevious = (
+                parseInt(meetingsEl.value || 0, 10) === prevDefault.meetingsPerWeek
+                && parseInt(lectureEl.value || 0, 10) === prevDefault.lectureMinutes
+                && parseInt(labEl.value || 0, 10) === prevDefault.labMinutes
+            );
+            if (currentPatternMatchesPrevious || !hoursEl.value) {
+                const nextDefault = getDefaultSubjectPattern(typeEl.value);
+                meetingsEl.value = String(nextDefault.meetingsPerWeek);
+                lectureEl.value = String(nextDefault.lectureMinutes);
+                labEl.value = String(nextDefault.labMinutes);
+            }
+            syncMajorTotal(meetingsEl, lectureEl, labEl, hoursEl);
             typeEl.dataset.previousType = typeEl.value;
         }
 
         function openModal(modalId) {
             document.getElementById(modalId).style.display = 'block';
+        }
+
+        function normalizeProgramOptionLabel(value) {
+            return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        }
+
+        function openAddSubjectModal(programId, aliases = []) {
+            const programSelect = document.getElementById('program_id');
+            if (programSelect) {
+                if (programId) {
+                    programSelect.value = String(programId);
+                } else {
+                    const aliasList = Array.isArray(aliases) ? aliases : [];
+                    const matchingOption = Array.from(programSelect.options).find(option => {
+                        const normalizedText = normalizeProgramOptionLabel(option.textContent);
+                        const normalizedValue = normalizeProgramOptionLabel(option.value);
+                        return aliasList.some(alias => alias === normalizedText || alias === normalizedValue || normalizedText.includes(alias));
+                    });
+                    programSelect.value = matchingOption ? matchingOption.value : 'all';
+                }
+            }
+            openModal('addSubjectModal');
+        }
+
+        function openAssignInstructorModal(subjectId, subjectLabel, instructorIds) {
+            const subjectIdEl = document.getElementById('assign_subject_id');
+            const subjectLabelEl = document.getElementById('assign_subject_label');
+            const selectedInstructorNames = Array.isArray(instructorIds)
+                ? instructorIds.map(id => assignableInstructorsById[String(id)] || '')
+                : [];
+            if (subjectIdEl) {
+                subjectIdEl.value = String(subjectId || '');
+            }
+            if (subjectLabelEl) {
+                subjectLabelEl.value = subjectLabel || '';
+            }
+            for (let slot = 1; slot <= 4; slot += 1) {
+                const instructorSelectEl = document.getElementById(`assign_instructor_id_${slot}`);
+                if (instructorSelectEl) {
+                    instructorSelectEl.value = selectedInstructorNames[slot - 1] || '';
+                }
+            }
+            openModal('assignInstructorModal');
         }
         
         function closeModal(modalId) {
@@ -718,17 +1428,16 @@ $subjects = $pdo->query("
                     document.getElementById('edit_prerequisites').value = data.prerequisites || '';
                     const editTypeEl = document.getElementById('edit_subject_type');
                     const editHoursEl = document.getElementById('edit_hours_per_week');
-                    const editLectureEl = document.getElementById('edit_lecture_hours');
-                    const editLabEl = document.getElementById('edit_lab_hours');
+                    const editMeetingsEl = document.getElementById('edit_meetings_per_week');
+                    const editLectureEl = document.getElementById('edit_lecture_minutes_per_meeting');
+                    const editLabEl = document.getElementById('edit_lab_minutes_per_meeting');
                     const editBreakdown = document.getElementById('edit_major_breakdown');
                     editTypeEl.value = (data.subject_type || 'major').toLowerCase();
                     editTypeEl.dataset.previousType = editTypeEl.value;
-                    editLectureEl.value = Number.parseFloat(data.lecture_hours || 0).toFixed(2);
-                    editLabEl.value = Number.parseFloat(data.lab_hours || 0).toFixed(2);
-                    editHoursEl.value = Number.parseFloat(data.hours_per_week || getHoursBySubjectType(editTypeEl.value)).toFixed(2);
-                    if (editTypeEl.value === 'major' && (parseFloat(editLectureEl.value) > 0 || parseFloat(editLabEl.value) > 0)) {
-                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
-                    }
+                    editMeetingsEl.value = String(data.meetings_per_week || 2);
+                    editLectureEl.value = String(data.lecture_minutes_per_meeting || 0);
+                    editLabEl.value = String(data.lab_minutes_per_meeting || 0);
+                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
                     updateMajorBreakdownVisibility(editTypeEl, editBreakdown, editHoursEl);
                     openModal('editSubjectModal');
                 });
@@ -737,62 +1446,54 @@ $subjects = $pdo->query("
         const addSubjectType = document.getElementById('subject_type');
         if (addSubjectType) {
             const addHoursEl = document.getElementById('hours_per_week');
-            const addLectureEl = document.getElementById('lecture_hours');
-            const addLabEl = document.getElementById('lab_hours');
+            const addMeetingsEl = document.getElementById('meetings_per_week');
+            const addLectureEl = document.getElementById('lecture_minutes_per_meeting');
+            const addLabEl = document.getElementById('lab_minutes_per_meeting');
             const addBreakdown = document.getElementById('add_major_breakdown');
             addSubjectType.dataset.previousType = addSubjectType.value;
             addSubjectType.addEventListener('change', function () {
-                syncHoursDefault(addSubjectType, addHoursEl);
+                syncHoursDefault(addSubjectType, addHoursEl, addMeetingsEl, addLectureEl, addLabEl);
                 updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
-                if (addSubjectType.value === 'major') {
-                    syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
-                }
             });
-            if (!addHoursEl.value) {
-                addHoursEl.value = getHoursBySubjectType(addSubjectType.value).toFixed(2);
-            }
-            if (addLectureEl && addLabEl) {
+            if (addMeetingsEl && addLectureEl && addLabEl) {
+                addMeetingsEl.addEventListener('input', function () {
+                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
+                });
                 addLectureEl.addEventListener('input', function () {
-                    if (addSubjectType.value === 'major') {
-                        syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
-                    }
+                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
                 });
                 addLabEl.addEventListener('input', function () {
-                    if (addSubjectType.value === 'major') {
-                        syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
-                    }
+                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
                 });
             }
             updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
-            syncMajorTotal(addLectureEl, addLabEl, addHoursEl);
+            syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
         }
 
         const editSubjectType = document.getElementById('edit_subject_type');
         if (editSubjectType) {
             const editHoursEl = document.getElementById('edit_hours_per_week');
-            const editLectureEl = document.getElementById('edit_lecture_hours');
-            const editLabEl = document.getElementById('edit_lab_hours');
+            const editMeetingsEl = document.getElementById('edit_meetings_per_week');
+            const editLectureEl = document.getElementById('edit_lecture_minutes_per_meeting');
+            const editLabEl = document.getElementById('edit_lab_minutes_per_meeting');
             const editBreakdown = document.getElementById('edit_major_breakdown');
             editSubjectType.addEventListener('change', function () {
-                syncHoursDefault(editSubjectType, editHoursEl);
+                syncHoursDefault(editSubjectType, editHoursEl, editMeetingsEl, editLectureEl, editLabEl);
                 updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
-                if (editSubjectType.value === 'major') {
-                    syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
-                }
             });
-            if (editLectureEl && editLabEl) {
+            if (editMeetingsEl && editLectureEl && editLabEl) {
+                editMeetingsEl.addEventListener('input', function () {
+                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
+                });
                 editLectureEl.addEventListener('input', function () {
-                    if (editSubjectType.value === 'major') {
-                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
-                    }
+                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
                 });
                 editLabEl.addEventListener('input', function () {
-                    if (editSubjectType.value === 'major') {
-                        syncMajorTotal(editLectureEl, editLabEl, editHoursEl);
-                    }
+                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
                 });
             }
             updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
+            syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
         }
         
         // Close modals when clicking outside
@@ -804,31 +1505,35 @@ $subjects = $pdo->query("
 
         const subjectSearchInput = document.getElementById('subject_search');
         const clearSubjectSearchBtn = document.getElementById('clear_subject_search');
+        const subjectRows = document.querySelectorAll('.data-table tbody tr');
+
+        function applySubjectFilters() {
+            const query = subjectSearchInput ? subjectSearchInput.value.trim().toLowerCase() : '';
+            subjectRows.forEach(row => {
+                const text = row.getAttribute('data-search-text') || '';
+                const matchesSearch = text.includes(query);
+                row.style.display = matchesSearch ? '' : 'none';
+            });
+            if (clearSubjectSearchBtn) {
+                clearSubjectSearchBtn.disabled = query.length === 0;
+            }
+        }
+
         if (subjectSearchInput) {
-            const subjectRows = document.querySelectorAll('.data-table tbody tr');
-
-            const filterSubjectRows = () => {
-                const query = subjectSearchInput.value.trim().toLowerCase();
-                subjectRows.forEach(row => {
-                    const text = row.getAttribute('data-search-text') || '';
-                    row.style.display = text.includes(query) ? '' : 'none';
-                });
-                if (clearSubjectSearchBtn) {
-                    clearSubjectSearchBtn.disabled = query.length === 0;
-                }
-            };
-
-            subjectSearchInput.addEventListener('input', filterSubjectRows);
-            filterSubjectRows();
+            subjectSearchInput.addEventListener('input', applySubjectFilters);
+            applySubjectFilters();
 
             if (clearSubjectSearchBtn) {
                 clearSubjectSearchBtn.addEventListener('click', function () {
                     subjectSearchInput.value = '';
-                    filterSubjectRows();
+                    applySubjectFilters();
                     subjectSearchInput.focus();
                 });
             }
+        } else {
+            applySubjectFilters();
         }
     </script>
 </body>
 </html>
+

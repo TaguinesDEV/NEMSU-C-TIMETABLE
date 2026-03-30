@@ -12,6 +12,47 @@ foreach ($pdo->query("SHOW COLUMNS FROM instructors")->fetchAll(PDO::FETCH_ASSOC
     $instructor_columns[$column['Field']] = true;
 }
 
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS subject_instructor_assignments (
+            subject_id INT NOT NULL,
+            assignment_slot TINYINT NOT NULL DEFAULT 1,
+            instructor_id INT NOT NULL,
+            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (subject_id, assignment_slot),
+            UNIQUE KEY uq_subject_instructor_assignment_pair (subject_id, instructor_id),
+            CONSTRAINT fk_subject_instructor_assignment_subject
+                FOREIGN KEY (subject_id) REFERENCES subjects(id) ON DELETE CASCADE,
+            CONSTRAINT fk_subject_instructor_assignment_instructor
+                FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
+        ) ENGINE=InnoDB
+    ");
+} catch (Exception $e) {
+    // Keep page usable even if auto-migration is not allowed.
+}
+
+try {
+    $assignmentColumns = [];
+    foreach ($pdo->query("SHOW COLUMNS FROM subject_instructor_assignments")->fetchAll(PDO::FETCH_ASSOC) as $col) {
+        $assignmentColumns[$col['Field']] = $col;
+    }
+    if (!isset($assignmentColumns['assignment_slot'])) {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments ADD COLUMN assignment_slot TINYINT NOT NULL DEFAULT 1 AFTER subject_id");
+    }
+    try {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments DROP PRIMARY KEY, ADD PRIMARY KEY (subject_id, assignment_slot)");
+    } catch (Exception $e) {
+        // Primary key already updated or cannot be altered in this environment.
+    }
+    try {
+        $pdo->exec("ALTER TABLE subject_instructor_assignments ADD UNIQUE KEY uq_subject_instructor_assignment_pair (subject_id, instructor_id)");
+    } catch (Exception $e) {
+        // Unique key already exists.
+    }
+} catch (Exception $e) {
+    // Keep page usable even if migration cannot run here.
+}
+
 function handleInstructorPhotoUpload(array $availableColumns, $fieldName = 'photo', $existingPath = null) {
     if (empty($_FILES[$fieldName]) || !is_array($_FILES[$fieldName]) || (int)($_FILES[$fieldName]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
         return [$existingPath, null];
@@ -67,19 +108,58 @@ function buildInstructorWriteData(array $availableColumns, array $baseData, arra
     return $data;
 }
 
+// Fetch programs early so subject assignments can be matched to instructor program
+$programs = $pdo->query("SELECT * FROM programs ORDER BY program_name")->fetchAll(PDO::FETCH_ASSOC);
+$programCodeById = [];
+foreach ($programs as $programRow) {
+    $programCodeById[(int)$programRow['id']] = strtoupper(trim((string)($programRow['program_code'] ?? '')));
+}
+
+function normalizeInstructorProgramCodeFromProgramId($programId, array $programCodeById): string {
+    $code = strtoupper(trim((string)($programCodeById[(int)$programId] ?? '')));
+    if ($code === 'BSCS') {
+        return 'CS';
+    }
+    if ($code === 'BSIT') {
+        return 'IT';
+    }
+    if ($code === 'BSCPE') {
+        return 'CPE';
+    }
+    return '';
+}
+
+function resolveSubjectProgramCodeForInstructorPage(array $subjectRow, array $programCodeById): string {
+    $department = strtoupper(trim((string)($subjectRow['department'] ?? '')));
+    if ($department === 'COMPUTER SCIENCE' || $department === 'BS COMPUTER SCIENCE') {
+        return 'CS';
+    }
+    if ($department === 'INFORMATION TECHNOLOGY' || $department === 'BS INFORMATION TECHNOLOGY') {
+        return 'IT';
+    }
+    if ($department === 'COMPUTER ENGINEERING' || $department === 'BS COMPUTER ENGINEERING') {
+        return 'CPE';
+    }
+    return normalizeInstructorProgramCodeFromProgramId((int)($subjectRow['program_id'] ?? 0), $programCodeById);
+}
+
 // Fetch subjects for instructor subject-priority assignment (used for UI + validation)
 $subjects_for_assignment = $pdo->query("
-    SELECT id, subject_code, subject_name
-    FROM subjects
-    ORDER BY subject_code
-")->fetchAll();
+    SELECT s.id, s.subject_code, s.subject_name, s.department, s.program_id
+    FROM subjects s
+    ORDER BY s.subject_code
+")->fetchAll(PDO::FETCH_ASSOC);
 
 $valid_subject_code_map = [];
+$subject_id_by_code = [];
+$subject_program_code_by_code = [];
 foreach ($subjects_for_assignment as $subject_row) {
     $code = strtoupper(trim((string)($subject_row['subject_code'] ?? '')));
     if ($code !== '') {
         // Keep canonical subject code as stored in DB
         $valid_subject_code_map[$code] = (string)$subject_row['subject_code'];
+        $subject_id_by_code[$code] = (int)($subject_row['id'] ?? 0);
+        $subject_program_code_by_code[$code] = resolveSubjectProgramCodeForInstructorPage($subject_row, $programCodeById);
     }
 }
 
@@ -145,6 +225,68 @@ function normalizeSpecializationSelection(array $rawValues, array $validCodeMap)
     return $result;
 }
 
+function filterSpecializationsByInstructorProgram(array $subjectCodes, string $requiredProgramCode, array $subjectProgramCodeByCode): array {
+    if ($requiredProgramCode === '') {
+        return $subjectCodes;
+    }
+
+    $filtered = [];
+    foreach ($subjectCodes as $subjectCode) {
+        $lookupKey = strtoupper(trim((string)$subjectCode));
+        $subjectProgramCode = strtoupper(trim((string)($subjectProgramCodeByCode[$lookupKey] ?? '')));
+        if ($subjectProgramCode === $requiredProgramCode) {
+            $filtered[] = $subjectCode;
+        }
+    }
+    return $filtered;
+}
+
+function syncInstructorSubjectAssignments(PDO $pdo, int $instructorId, array $subjectCodes, array $subjectIdByCode): void {
+    $subjectIds = [];
+    foreach ($subjectCodes as $subjectCode) {
+        $lookupKey = strtoupper(trim((string)$subjectCode));
+        $subjectId = (int)($subjectIdByCode[$lookupKey] ?? 0);
+        if ($subjectId > 0) {
+            $subjectIds[] = $subjectId;
+        }
+    }
+    $subjectIds = array_values(array_unique($subjectIds));
+
+    $delete = $pdo->prepare("DELETE FROM subject_instructor_assignments WHERE instructor_id = ?");
+    $delete->execute([$instructorId]);
+
+    if (!$subjectIds) {
+        return;
+    }
+
+    $slotStmt = $pdo->prepare("
+        SELECT assignment_slot
+        FROM subject_instructor_assignments
+        WHERE subject_id = ?
+        ORDER BY assignment_slot
+    ");
+    $insertStmt = $pdo->prepare("
+        INSERT INTO subject_instructor_assignments (subject_id, assignment_slot, instructor_id)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE instructor_id = VALUES(instructor_id)
+    ");
+    foreach ($subjectIds as $subjectId) {
+        $slotStmt->execute([$subjectId]);
+        $usedSlots = array_map('intval', $slotStmt->fetchAll(PDO::FETCH_COLUMN));
+        $nextSlot = null;
+        for ($slot = 1; $slot <= 4; $slot++) {
+            if (!in_array($slot, $usedSlots, true)) {
+                $nextSlot = $slot;
+                break;
+            }
+        }
+        if ($nextSlot === null) {
+            continue;
+        }
+        $insertStmt->execute([$subjectId, $nextSlot, $instructorId]);
+    }
+}
+
 // Handle Add/Edit/Delete operations
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_instructor'])) {
@@ -164,6 +306,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ], $valid_subject_code_map);
         $max_hours = $_POST['max_hours_per_week'];
         $program_id = !empty($_POST['program_id']) ? $_POST['program_id'] : null;
+        $required_program_code = normalizeInstructorProgramCodeFromProgramId((int)$program_id, $programCodeById);
+        $specializations = filterSpecializationsByInstructorProgram($specializations, $required_program_code, $subject_program_code_by_code);
         $designation = normalizeDeloadText($_POST['designation'] ?? '');
         $designation_units = normalizeDeloadUnits($_POST['designation_units'] ?? 0);
         $research_extension = normalizeResearchExtensionType($_POST['research_extension'] ?? '');
@@ -234,6 +378,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = $pdo->prepare("INSERT INTO instructor_specializations (instructor_id, specialization_id, priority) VALUES (?, ?, ?)");
                 $stmt->execute([$instructor_id, $spec_id, $priority + 1]);
             }
+
+            syncInstructorSubjectAssignments($pdo, (int)$instructor_id, $specializations, $subject_id_by_code);
             
             $pdo->commit();
             $message = "Instructor added successfully!";
@@ -263,6 +409,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ], $valid_subject_code_map);
         $max_hours = $_POST['max_hours_per_week'];
         $program_id = !empty($_POST['program_id']) ? $_POST['program_id'] : null;
+        $required_program_code = normalizeInstructorProgramCodeFromProgramId((int)$program_id, $programCodeById);
+        $specializations = filterSpecializationsByInstructorProgram($specializations, $required_program_code, $subject_program_code_by_code);
         $designation = normalizeDeloadText($_POST['designation'] ?? '');
         $designation_units = normalizeDeloadUnits($_POST['designation_units'] ?? 0);
         $research_extension = normalizeResearchExtensionType($_POST['research_extension'] ?? '');
@@ -347,6 +495,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = $pdo->prepare("INSERT INTO instructor_specializations (instructor_id, specialization_id, priority) VALUES (?, ?, ?)");
                 $stmt->execute([$id, $spec_id, $priority + 1]);
             }
+
+            syncInstructorSubjectAssignments($pdo, (int)$id, $specializations, $subject_id_by_code);
             
             $pdo->commit();
             $message = "Instructor updated successfully!";
@@ -447,9 +597,6 @@ $instructors = $pdo->query("
     ORDER BY u.full_name
 ")->fetchAll();
 
-// Fetch programs for dropdown
-$programs = $pdo->query("SELECT * FROM programs ORDER BY program_name")->fetchAll();
-
 // Fetch time slots for availability modal
 $time_slots = $pdo->query("
     SELECT *, COALESCE(slot_type, 'regular') AS slot_type
@@ -459,6 +606,16 @@ $time_slots = $pdo->query("
 
 // Function to get specializations for an instructor
 function getInstructorSpecializations($pdo, $instructor_id) {
+    $assignedStmt = $pdo->prepare("
+        SELECT sub.subject_code
+        FROM subject_instructor_assignments sia
+        JOIN subjects sub ON sia.subject_id = sub.id
+        WHERE sia.instructor_id = ?
+        ORDER BY sub.subject_code
+    ");
+    $assignedStmt->execute([$instructor_id]);
+    $assignedSubjectCodes = $assignedStmt->fetchAll(PDO::FETCH_COLUMN);
+
     $stmt = $pdo->prepare("
         SELECT s.specialization_name 
         FROM instructor_specializations ism
@@ -467,7 +624,16 @@ function getInstructorSpecializations($pdo, $instructor_id) {
         ORDER BY ism.priority
     ");
     $stmt->execute([$instructor_id]);
-    return $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $specializations = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+    $merged = [];
+    foreach (array_merge($assignedSubjectCodes, $specializations) as $subjectCode) {
+        $subjectCode = trim((string)$subjectCode);
+        if ($subjectCode !== '' && !in_array($subjectCode, $merged, true)) {
+            $merged[] = $subjectCode;
+        }
+    }
+    return array_slice($merged, 0, 5);
 }
 
 // Function to get program name by ID
@@ -783,13 +949,7 @@ function getProgramName($pdo, $program_id) {
         <div class="modal-content">
             <span class="close" onclick="closeModal('addModal')">&times;</span>
             <h2>Add New Instructor</h2>
-            <datalist id="subject_code_options">
-                <?php foreach ($subjects_for_assignment as $subject): ?>
-                    <option value="<?php echo htmlspecialchars($subject['subject_code']); ?>">
-                        <?php echo htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name']); ?>
-                    </option>
-                <?php endforeach; ?>
-            </datalist>
+            <datalist id="add_subject_code_options"></datalist>
             <form method="POST" enctype="multipart/form-data">
                 <div class="form-group">
                     <label for="username">Username:</label>
@@ -868,23 +1028,23 @@ function getProgramName($pdo, $program_id) {
                 <h3>Preferred Subjects (up to 5, by priority)</h3>
                 <div class="form-group">
                     <label for="specialization_1">Primary Subject:</label>
-                    <input type="text" id="specialization_1" name="specialization_1" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="specialization_1" name="specialization_1" list="add_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_2">Secondary Subject:</label>
-                    <input type="text" id="specialization_2" name="specialization_2" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="specialization_2" name="specialization_2" list="add_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_3">Tertiary Subject:</label>
-                    <input type="text" id="specialization_3" name="specialization_3" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="specialization_3" name="specialization_3" list="add_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_4">4th Subject:</label>
-                    <input type="text" id="specialization_4" name="specialization_4" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="specialization_4" name="specialization_4" list="add_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="specialization_5">5th Subject (Extra Subject):</label>
-                    <input type="text" id="specialization_5" name="specialization_5" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="specialization_5" name="specialization_5" list="add_subject_code_options" placeholder="Search subject code...">
                 </div>
                 
                 <div class="form-group">
@@ -934,6 +1094,7 @@ function getProgramName($pdo, $program_id) {
         <div class="modal-content">
             <span class="close" onclick="closeModal('editModal')">&times;</span>
             <h2>Edit Instructor</h2>
+            <datalist id="edit_subject_code_options"></datalist>
             <form method="POST" id="editForm" enctype="multipart/form-data">
                 <input type="hidden" id="edit_id" name="instructor_id">
                 
@@ -1004,23 +1165,23 @@ function getProgramName($pdo, $program_id) {
                 <h3>Preferred Subjects (up to 5, by priority)</h3>
                 <div class="form-group">
                     <label for="edit_specialization_1">Primary Subject:</label>
-                    <input type="text" id="edit_specialization_1" name="specialization_1" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="edit_specialization_1" name="specialization_1" list="edit_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_2">Secondary Subject:</label>
-                    <input type="text" id="edit_specialization_2" name="specialization_2" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="edit_specialization_2" name="specialization_2" list="edit_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_3">Tertiary Subject:</label>
-                    <input type="text" id="edit_specialization_3" name="specialization_3" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="edit_specialization_3" name="specialization_3" list="edit_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_4">4th Subject:</label>
-                    <input type="text" id="edit_specialization_4" name="specialization_4" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="edit_specialization_4" name="specialization_4" list="edit_subject_code_options" placeholder="Search subject code...">
                 </div>
                 <div class="form-group">
                     <label for="edit_specialization_5">5th Subject (Extra Subject):</label>
-                    <input type="text" id="edit_specialization_5" name="specialization_5" list="subject_code_options" placeholder="Search subject code...">
+                    <input type="text" id="edit_specialization_5" name="specialization_5" list="edit_subject_code_options" placeholder="Search subject code...">
                 </div>
                 
                 <div class="form-group">
@@ -1108,6 +1269,54 @@ function getProgramName($pdo, $program_id) {
     <script>
         // Program data for JavaScript
         const programs = <?php echo json_encode(array_map(function($p) { return ['id' => $p['id'], 'name' => $p['program_name']]; }, $programs)); ?>;
+        const subjectAssignments = <?php echo json_encode(array_map(function($subject) use ($subject_program_code_by_code) {
+            $lookupCode = strtoupper(trim((string)($subject['subject_code'] ?? '')));
+            return [
+                'code' => (string)$subject['subject_code'],
+                'name' => (string)$subject['subject_name'],
+                'program_code' => (string)($subject_program_code_by_code[$lookupCode] ?? ''),
+            ];
+        }, $subjects_for_assignment)); ?>;
+
+        function normalizeInstructorProgramCode(programId) {
+            const id = String(programId || '');
+            const matched = programs.find(program => String(program.id) === id);
+            if (!matched) {
+                return '';
+            }
+            const name = String(matched.name || '').toLowerCase();
+            if (name.includes('computer science')) {
+                return 'CS';
+            }
+            if (name.includes('information technology')) {
+                return 'IT';
+            }
+            if (name.includes('computer engineering')) {
+                return 'CPE';
+            }
+            return '';
+        }
+
+        function populateSubjectOptions(datalistId, programSelectId) {
+            const datalist = document.getElementById(datalistId);
+            const programSelect = document.getElementById(programSelectId);
+            if (!datalist || !programSelect) {
+                return;
+            }
+
+            const requiredProgramCode = normalizeInstructorProgramCode(programSelect.value);
+            const matchingSubjects = subjectAssignments.filter(subject => {
+                return requiredProgramCode === '' || subject.program_code === requiredProgramCode;
+            });
+
+            datalist.innerHTML = '';
+            matchingSubjects.forEach(subject => {
+                const option = document.createElement('option');
+                option.value = subject.code;
+                option.label = `${subject.code} - ${subject.name}`;
+                datalist.appendChild(option);
+            });
+        }
         
         function openModal(modalId) {
             document.getElementById(modalId).style.display = 'block';
@@ -1147,6 +1356,7 @@ function getProgramName($pdo, $program_id) {
                     // Set program dropdown
                     const programSelect = document.getElementById('edit_program_id');
                     programSelect.value = data.program_id || '';
+                    populateSubjectOptions('edit_subject_code_options', 'edit_program_id');
                     
                     openModal('editModal');
                 });
@@ -1220,6 +1430,22 @@ function getProgramName($pdo, $program_id) {
         // Live table search
         const instructorSearchInput = document.getElementById('instructor_search');
         const clearInstructorSearchBtn = document.getElementById('clear_instructor_search');
+        const addProgramSelect = document.getElementById('program_id');
+        if (addProgramSelect) {
+            populateSubjectOptions('add_subject_code_options', 'program_id');
+            addProgramSelect.addEventListener('change', function () {
+                populateSubjectOptions('add_subject_code_options', 'program_id');
+            });
+        }
+
+        const editProgramSelect = document.getElementById('edit_program_id');
+        if (editProgramSelect) {
+            populateSubjectOptions('edit_subject_code_options', 'edit_program_id');
+            editProgramSelect.addEventListener('change', function () {
+                populateSubjectOptions('edit_subject_code_options', 'edit_program_id');
+            });
+        }
+
         if (instructorSearchInput) {
             const instructorRows = document.querySelectorAll('.data-table tbody tr');
 
