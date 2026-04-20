@@ -104,12 +104,30 @@ function getAvailableTimeSlots(PDO $pdo, int $instructorId, int $roomId, int $en
     $stmt->execute([$entryId, $roomId, $instructorId]);
     $blocked = array_flip(array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN)));
 
+    // Institutional Policy: Permanent instructors cannot teach regular subjects on Wednesdays
+    $instStmt = $pdo->prepare("SELECT status FROM instructors WHERE id = ?");
+    $instStmt->execute([$instructorId]);
+    $instStatus = strtolower((string)$instStmt->fetchColumn());
+    
+    $subjStmt = $pdo->prepare("SELECT sub.subject_code FROM schedules s JOIN subjects sub ON s.subject_id = sub.id WHERE s.id = ?");
+    $subjStmt->execute([$entryId]);
+    $subjCode = strtoupper((string)$subjStmt->fetchColumn());
+    
+    // Logic: Bar if Permanent AND Wednesday AND NOT (PATHFIT/PE)
+    $isRestrictedInstructor = ($instStatus === 'permanent');
+    $isPeSubject = (str_contains($subjCode, 'PATHFIT') || (str_starts_with($subjCode, 'PE') && !str_starts_with($subjCode, 'CPE')));
+    $applyWednesdayRestriction = ($isRestrictedInstructor && !$isPeSubject);
+
     $available = [];
     $currentSlot = null;
     foreach ($timeSlots as $slot) {
         $slotId = (int)$slot['id'];
         if ($slotId === $currentTimeSlotId) {
             $currentSlot = $slot;
+        }
+        // Filter by policy
+        if ($applyWednesdayRestriction && strtolower($slot['day']) === 'wednesday') {
+            continue;
         }
         if (!isset($blocked[$slotId])) {
             $available[] = [
@@ -320,10 +338,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute([$time_slot_id, $instructor_id, $entry_id]);
         $instructor_conflict = (int)$stmt->fetchColumn();
 
+        // Final Institutional Policy Check for Wednesday
+        $policy_violation = false;
+        $slotStmt = $pdo->prepare("SELECT day FROM time_slots WHERE id = ?");
+        $slotStmt->execute([$time_slot_id]);
+        $slotDay = strtolower((string)$slotStmt->fetchColumn());
+        
+        if ($slotDay === 'wednesday') {
+            $instStmt = $pdo->prepare("SELECT status FROM instructors WHERE id = ?");
+            $instStmt->execute([$instructor_id]);
+            if (strtolower((string)$instStmt->fetchColumn()) === 'permanent') {
+                $subjStmt = $pdo->prepare("SELECT sub.subject_code FROM schedules s JOIN subjects sub ON s.subject_id = sub.id WHERE s.id = ?");
+                $subjStmt->execute([$entry_id]);
+                $subjCode = strtoupper((string)$subjStmt->fetchColumn());
+                if (!(str_contains($subjCode, 'PATHFIT') || (str_starts_with($subjCode, 'PE') && !str_starts_with($subjCode, 'CPE')))) {
+                    $policy_violation = true;
+                }
+            }
+        }
+
         if ($room_conflict > 0) {
             $error = 'This room is already booked for the selected time slot.';
         } elseif ($instructor_conflict > 0) {
             $error = 'This instructor is already assigned to another class at this time.';
+        } elseif ($policy_violation) {
+            $error = 'Institutional Policy: Permanent instructors cannot be assigned to regular subjects on Wednesdays.';
         } else {
             $stmt = $pdo->prepare("\n                UPDATE schedules\n                SET instructor_id = ?, room_id = ?, time_slot_id = ?\n                WHERE id = ?\n            ");
             if ($stmt->execute([$instructor_id, $room_id, $time_slot_id, $entry_id])) {

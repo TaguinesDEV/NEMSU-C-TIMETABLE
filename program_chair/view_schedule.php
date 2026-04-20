@@ -9,6 +9,14 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'program_chair') {
 }
 
 $pdo = getDB();
+
+// Ensure is_praise and is_overload columns exist
+try {
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN is_praise TINYINT(1) NOT NULL DEFAULT 0 AFTER is_overload");
+} catch (Exception $e) {
+    // Column likely already exists
+}
+
 $user_id = $_SESSION['user_id'];
 
 // Get program chair's program
@@ -117,6 +125,7 @@ $stmt = $pdo->prepare("
         i.id as instructor_id,
         u.full_name as instructor_name,
         i.max_hours_per_week,
+        i.status as instructor_status,
         r.room_number,
         r.building,
         ts.day,
@@ -241,6 +250,18 @@ unset($overloadRow);
         
         .published-row {
             background-color: #d4edda;
+        }
+
+        .praise-row {
+            background-color: #fff3cd !important;
+            font-weight: bold;
+            border: 1px solid #ff9800;
+        }
+
+        .overload-row {
+            background-color: #ffe0e0 !important;
+            font-weight: bold;
+            border: 1px solid #dc3545;
         }
         
         .published-badge {
@@ -497,12 +518,33 @@ unset($overloadRow);
                                 <tbody>
                                     <?php 
                                     usort($grouped[$day], function($a, $b) {
-                                        return strtotime($a['start_time']) - strtotime($b['start_time']);
+                                        $timeCompare = strtotime((string)($a['start_time'] ?? '')) <=> strtotime((string)($b['start_time'] ?? ''));
+                                        if ($timeCompare !== 0) {
+                                            return $timeCompare;
+                                        }
+
+                                        $rank = static function ($row): int {
+                                            $meetingKind = strtolower(trim((string)($row['meeting_kind'] ?? '')));
+                                            if ($meetingKind === 'lecture') {
+                                                return 0;
+                                            }
+                                            if ($meetingKind === 'lab') {
+                                                return 1;
+                                            }
+                                            return 2;
+                                        };
+
+                                        $meetingCompare = $rank($a) <=> $rank($b);
+                                        if ($meetingCompare !== 0) {
+                                            return $meetingCompare;
+                                        }
+
+                                        return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
                                     });
                                     
                                     foreach ($grouped[$day] as $s): 
                                     ?>
-                                    <tr class="schedule-search-row <?php echo $s['is_published'] ? 'published-row' : ''; ?>"
+                                    <tr class="schedule-search-row <?php echo $s['is_published'] ? 'published-row' : ''; ?> <?php echo isset($s['is_praise']) && $s['is_praise'] ? 'praise-row' : ''; ?> <?php echo isset($s['is_overload']) && $s['is_overload'] ? 'overload-row' : ''; ?>"
                                         data-search="<?php echo htmlspecialchars(strtolower(implode(' ', [
                                             (string)$day,
                                             (string)($s['subject_code'] ?? ''),
@@ -519,7 +561,15 @@ unset($overloadRow);
                                             <strong><?php echo $s['subject_code']; ?></strong><br>
                                             <small><?php echo $s['subject_name']; ?></small>
                                         </td>
-                                        <td><?php echo $s['instructor_name']; ?></td>
+                                        <td>
+                                            <?php echo $s['instructor_name']; ?>
+                                            <?php if (isset($s['is_praise']) && $s['is_praise']): ?>
+                                                <span style="background: #ff9800; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 5px; font-weight: bold;">PRAISE</span>
+                                            <?php endif; ?>
+                                            <?php if (isset($s['is_overload']) && $s['is_overload']): ?>
+                                                <span style="background: #dc3545; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 5px; font-weight: bold;">OVERLOAD</span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td><?php echo $s['room_number']; ?> (<?php echo $s['building']; ?>)</td>
                                         <td>
                                             <div class="row-actions">

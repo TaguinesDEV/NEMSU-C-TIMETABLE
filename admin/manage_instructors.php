@@ -315,6 +315,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $special_assignment = normalizeDeloadText($_POST['special_assignment'] ?? '');
         $special_assignment_units = normalizeDeloadUnits($_POST['special_assignment_units'] ?? 0);
         $rank = trim($_POST['rank'] ?? '');
+        $major = trim($_POST['major'] ?? '');
         $education = trim($_POST['education'] ?? '');
         $eligibility = trim($_POST['eligibility'] ?? '');
         $service_years = trim($_POST['service_years'] ?? '');
@@ -350,6 +351,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ],
                 [
                     'rank' => $rank,
+                    'specialization' => $major,
                     'education' => $education,
                     'eligibility' => $eligibility,
                     'service_years' => $service_years,
@@ -418,6 +420,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $special_assignment = normalizeDeloadText($_POST['special_assignment'] ?? '');
         $special_assignment_units = normalizeDeloadUnits($_POST['special_assignment_units'] ?? 0);
         $rank = trim($_POST['rank'] ?? '');
+        $major = trim($_POST['major'] ?? '');
         $education = trim($_POST['education'] ?? '');
         $eligibility = trim($_POST['eligibility'] ?? '');
         $service_years = trim($_POST['service_years'] ?? '');
@@ -462,6 +465,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ],
                 [
                     'rank' => $rank,
+                    'specialization' => $major,
                     'education' => $education,
                     'eligibility' => $eligibility,
                     'service_years' => $service_years,
@@ -664,6 +668,142 @@ function getProgramName($pdo, $program_id) {
             background-color: rgba(0,0,0,0.5);
         }
         
+        .manage-instructors-modal .modal-content {
+            background: white;
+            margin: 3% auto;
+            padding: 35px;
+            border-radius: 16px;
+            width: min(96%, 980px);
+            max-width: 980px;
+            max-height: 92vh;
+            overflow-y: auto;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+        }
+        
+        .manage-instructors-modal .modal-content h2 {
+            font-size: 28px;
+            margin-bottom: 25px;
+            color: #1e293b;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 12px;
+        }
+        
+        /* Edit Form Styles (same as subjects) */
+        .edit-form,
+        .edit-form-layout,
+        .edit-form-main,
+        .edit-form-side {
+            width: 100%;
+        }
+
+        .edit-form-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+            gap: 24px;
+            align-items: start;
+        }
+
+        .edit-form-main,
+        .edit-form-side {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            min-width: 0;
+        }
+
+        .edit-form-section {
+            width: 100%;
+            box-sizing: border-box;
+            background: linear-gradient(180deg, #ffffff, #f8fafc);
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 28px;
+            margin-bottom: 0;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+        
+        .edit-form-section h3 {
+            font-size: 20px;
+            font-weight: 700;
+            margin: -8px 0 24px 0;
+            color: #1e293b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px 28px;
+        }
+        
+        .form-full {
+            grid-column: 1 / -1;
+        }
+        
+        .form-actions {
+            display: flex;
+            justify-content: stretch;
+            padding-top: 20px;
+            border-top: 1px solid #e5e7eb;
+            margin-top: 20px;
+        }
+
+        .manage-instructors-modal .form-actions .btn-primary {
+            width: 100%;
+            justify-content: center;
+            padding: 16px 18px;
+            font-size: 16px;
+            font-weight: 700;
+            border-radius: 12px;
+            box-shadow: 0 12px 24px rgba(59, 130, 246, 0.22);
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .form-group label {
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 15px;
+            color: #374151;
+        }
+        
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            padding: 14px 16px;
+            border: 1px solid #d1d5db;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+        
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
+        }
+        @media (max-width: 900px) {
+            .edit-form-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
         .modal-content {
             background-color: white;
             margin: 50px auto;
@@ -674,6 +814,7 @@ function getProgramName($pdo, $program_id) {
             max-height: 80vh;
             overflow-y: auto;
         }
+
         
         .close {
             float: right;
@@ -882,7 +1023,7 @@ function getProgramName($pdo, $program_id) {
                     <th>Program</th>
                     <th>Subject Assignments</th>
                     <th>Nature of Designation / Units Deloading</th>
-                    <th>Max Hours/Week</th>
+                    <th>Max Units/Week</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -982,6 +1123,11 @@ function getProgramName($pdo, $program_id) {
                     <label for="rank">Rank:</label>
                     <input type="text" id="rank" name="rank" placeholder="Instructor / Assistant Professor">
                 </div>
+
+                <div class="form-group">
+                    <label for="major">Major:</label>
+                    <input type="text" id="major" name="major" placeholder="e.g., Mathematics / Computer Engineering">
+                </div>
                 
                 <div class="form-group">
                     <label for="education">Educational Background:</label>
@@ -1005,7 +1151,7 @@ function getProgramName($pdo, $program_id) {
 
                 <div class="form-group">
                     <label for="status">Status:</label>
-                    <select id="status" name="status" required>
+                    <select id="status" name="status" onchange="updateMaxUnits()" required>
                         <option value="">Select Status</option>
                         <option value="Permanent">Permanent</option>
                         <option value="Contractual">Contractual</option>
@@ -1048,8 +1194,9 @@ function getProgramName($pdo, $program_id) {
                 </div>
                 
                 <div class="form-group">
-                    <label for="max_hours_per_week">Max Hours per Week:</label>
-                    <input type="number" id="max_hours_per_week" name="max_hours_per_week" min="1" max="40" value="20" required>
+                    <label for="max_hours_per_week">Max Load per Week:</label>
+                    <input type="number" id="max_hours_per_week" name="max_hours_per_week" min="1" max="40" value="30" required>
+                    <small>Permanent: Units (base 18 + up to 6 overload). Contractual/Temporary: Hours (max 30).</small>
                 </div>
 
                 <h3>Nature of Designation / Units Deloading</h3>
@@ -1090,140 +1237,183 @@ function getProgramName($pdo, $program_id) {
 
     
     <!-- Edit Instructor Modal -->
-    <div id="editModal" class="modal">
+    <div id="editModal" class="modal manage-instructors-modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('editModal')">&times;</span>
             <h2>Edit Instructor</h2>
             <datalist id="edit_subject_code_options"></datalist>
-            <form method="POST" id="editForm" enctype="multipart/form-data">
+            <form method="POST" id="editForm" enctype="multipart/form-data" class="edit-form">
                 <input type="hidden" id="edit_id" name="instructor_id">
-                
-                <div class="form-group">
-                    <label for="edit_email">Email:</label>
-                    <input type="email" id="edit_email" name="email" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_full_name">Full Name:</label>
-                    <input type="text" id="edit_full_name" name="full_name" required>
-                </div>
 
-                <div class="form-group">
-                    <label for="edit_photo">Profile Photo:</label>
-                    <input type="file" id="edit_photo" name="photo" accept="image/*">
-                    <small>Optional - JPG/PNG, max 2MB (current photo remains if empty)</small>
-                </div>
+                <div class="edit-form-layout">
+                    <div class="edit-form-main">
+                        <!-- Profile Information Section -->
+                        <div class="edit-form-section">
+                            <h3>📋 Profile Information</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_rank">Rank:</label>
+                                    <input type="text" id="edit_rank" name="rank">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_major">Major:</label>
+                                    <input type="text" id="edit_major" name="major">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_eligibility">Eligibility:</label>
+                                    <input type="text" id="edit_eligibility" name="eligibility">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_service_years">Service Years:</label>
+                                    <input type="text" id="edit_service_years" name="service_years">
+                                </div>
+                            </div>
+                            <div class="form-group form-full">
+                                <label for="edit_education">Educational Background:</label>
+                                <textarea id="edit_education" name="education" rows="3" placeholder="Educational background..."></textarea>
+                            </div>
+                        </div>
 
-                <h3>Profile Information</h3>
-                <div class="form-group">
-                    <label for="edit_rank">Rank:</label>
-                    <input type="text" id="edit_rank" name="rank">
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_education">Educational Background:</label>
-                    <textarea id="edit_education" name="education" rows="2"></textarea>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_eligibility">Eligibility:</label>
-                    <input type="text" id="edit_eligibility" name="eligibility">
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_service_years">Length of Service:</label>
-                    <input type="text" id="edit_service_years" name="service_years">
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_department">Department:</label>
-                    <input type="text" id="edit_department" name="department" required>
-                </div>
+                        <!-- Deload Section -->
+                        <div class="edit-form-section">
+                            <h3>📊 Load & Deload</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_designation">Designation:</label>
+                                    <input type="text" id="edit_designation" name="designation">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_designation_units">Designation Units:</label>
+                                    <input type="number" id="edit_designation_units" name="designation_units" min="0" step="0.5">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_research_extension">Research/Extension:</label>
+                                    <select id="edit_research_extension" name="research_extension">
+                                        <option value="">None</option>
+                                        <option value="research">Research</option>
+                                        <option value="extension">Extension</option>
+                                        <option value="both">Both</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_research_extension_units">R/E Units:</label>
+                                    <input type="number" id="edit_research_extension_units" name="research_extension_units" min="0" step="0.5">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_special_assignment">Special Assignment:</label>
+                                    <input type="text" id="edit_special_assignment" name="special_assignment">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_special_assignment_units">Special Units:</label>
+                                    <input type="number" id="edit_special_assignment_units" name="special_assignment_units" min="0" step="0.5">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group form-full">
+                                    <label for="edit_max_hours">Max Load/Week:</label>
+                                    <input type="number" id="edit_max_hours" name="max_hours_per_week" min="1" max="40" required>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
 
-                <div class="form-group">
-                    <label for="edit_status">Status:</label>
-                    <select id="edit_status" name="status" required>
-                        <option value="">Select Status</option>
-                        <option value="Permanent">Permanent</option>
-                        <option value="Contractual">Contractual</option>
-                        <option value="Temporary">Temporary</option>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_program_id">Program (for Program Chair filtering):</label>
-                    <select id="edit_program_id" name="program_id">
-                        <option value="">All Programs</option>
-                        <?php foreach ($programs as $program): ?>
-                            <option value="<?php echo $program['id']; ?>">
-                                <?php echo htmlspecialchars($program['program_name']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                
-                <h3>Preferred Subjects (up to 5, by priority)</h3>
-                <div class="form-group">
-                    <label for="edit_specialization_1">Primary Subject:</label>
-                    <input type="text" id="edit_specialization_1" name="specialization_1" list="edit_subject_code_options" placeholder="Search subject code...">
-                </div>
-                <div class="form-group">
-                    <label for="edit_specialization_2">Secondary Subject:</label>
-                    <input type="text" id="edit_specialization_2" name="specialization_2" list="edit_subject_code_options" placeholder="Search subject code...">
-                </div>
-                <div class="form-group">
-                    <label for="edit_specialization_3">Tertiary Subject:</label>
-                    <input type="text" id="edit_specialization_3" name="specialization_3" list="edit_subject_code_options" placeholder="Search subject code...">
-                </div>
-                <div class="form-group">
-                    <label for="edit_specialization_4">4th Subject:</label>
-                    <input type="text" id="edit_specialization_4" name="specialization_4" list="edit_subject_code_options" placeholder="Search subject code...">
-                </div>
-                <div class="form-group">
-                    <label for="edit_specialization_5">5th Subject (Extra Subject):</label>
-                    <input type="text" id="edit_specialization_5" name="specialization_5" list="edit_subject_code_options" placeholder="Search subject code...">
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_max_hours">Max Hours per Week:</label>
-                    <input type="number" id="edit_max_hours" name="max_hours_per_week" min="1" max="40" required>
-                </div>
+                    <div class="edit-form-side">
+                        <!-- Basic Information Section -->
+                        <div class="edit-form-section">
+                            <h3>👤 Basic Information</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_email">Email:</label>
+                                    <input type="email" id="edit_email" name="email" required>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_full_name">Full Name:</label>
+                                    <input type="text" id="edit_full_name" name="full_name" required>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_photo">Profile Photo:</label>
+                                    <input type="file" id="edit_photo" name="photo" accept="image/*">
+                                    <small>Optional - JPG/PNG, max 2MB</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_department">Department:</label>
+                                    <input type="text" id="edit_department" name="department" required>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_status">Status:</label>
+                                    <select id="edit_status" name="status" onchange="updateEditMaxUnits()" required>
+                                        <option value="">Select Status</option>
+                                        <option value="Permanent">Permanent</option>
+                                        <option value="Contractual">Contractual</option>
+                                        <option value="Temporary">Temporary</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_program_id">Program:</label>
+                                    <select id="edit_program_id" name="program_id">
+                                        <option value="">All Programs</option>
+                                        <?php foreach ($programs as $program): ?>
+                                        <option value="<?php echo $program['id']; ?>"><?php echo htmlspecialchars($program['program_name']); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
 
-                <h3>Nature of Designation / Units Deloading</h3>
-                <div class="form-group">
-                    <label for="edit_designation">Designation:</label>
-                    <input type="text" id="edit_designation" name="designation">
+                        <!-- Subject Section -->
+                        <div class="edit-form-section">
+                            <h3>📚 Subject</h3>
+                            <div class="form-group form-full">
+                                <label>Preferred Subjects (Top 5):</label>
+                                <div style="font-size: 13px; color: #6b7280;">
+                                    1st input = Primary, 2nd = Secondary, etc.
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_specialization_1">1. Primary Subject:</label>
+                                    <input type="text" id="edit_specialization_1" name="specialization_1" list="edit_subject_code_options" placeholder="e.g. CS101">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_specialization_2">2. Secondary:</label>
+                                    <input type="text" id="edit_specialization_2" name="specialization_2" list="edit_subject_code_options">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_specialization_3">3. Tertiary:</label>
+                                    <input type="text" id="edit_specialization_3" name="specialization_3" list="edit_subject_code_options">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_specialization_4">4. Extra:</label>
+                                    <input type="text" id="edit_specialization_4" name="specialization_4" list="edit_subject_code_options">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="edit_specialization_5">5. Extra Subject:</label>
+                                <input type="text" id="edit_specialization_5" name="specialization_5" list="edit_subject_code_options">
+                            </div>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" name="edit_instructor" class="btn-primary">💾 Update Instructor</button>
+                        </div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label for="edit_designation_units">Designation Units Deloading:</label>
-                    <input type="number" id="edit_designation_units" name="designation_units" min="0" step="0.5">
-                </div>
-                <div class="form-group">
-                    <label for="edit_research_extension">Research / Extension:</label>
-                    <select id="edit_research_extension" name="research_extension">
-                        <option value="">Select Type</option>
-                        <option value="research">Research</option>
-                        <option value="extension">Extension</option>
-                        <option value="both">Research/Extension</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="edit_research_extension_units">Research / Extension Units Deloading:</label>
-                    <input type="number" id="edit_research_extension_units" name="research_extension_units" min="0" step="0.5">
-                </div>
-                <div class="form-group">
-                    <label for="edit_special_assignment">Special Assignment:</label>
-                    <input type="text" id="edit_special_assignment" name="special_assignment">
-                </div>
-                <div class="form-group">
-                    <label for="edit_special_assignment_units">Special Assignment Units Deloading:</label>
-                    <input type="number" id="edit_special_assignment_units" name="special_assignment_units" min="0" step="0.5">
-                </div>
-                
-                <button type="submit" name="edit_instructor" class="btn-primary">Update Instructor</button>
             </form>
         </div>
     </div>
+
     
     <!-- Availability Modal -->
     <div id="availabilityModal" class="modal">
@@ -1341,7 +1531,20 @@ function getProgramName($pdo, $program_id) {
                     document.getElementById('edit_specialization_3').value = data.specializations?.[2] || '';
                     document.getElementById('edit_specialization_4').value = data.specializations?.[3] || '';
                     document.getElementById('edit_specialization_5').value = data.specializations?.[4] || '';
-                    document.getElementById('edit_max_hours').value = data.max_hours_per_week;
+                    
+                    // Set max hours based on status
+                    var statusSelect = document.getElementById('edit_status');
+                    var maxHoursInput = document.getElementById('edit_max_hours');
+                    var savedMaxHours = data.max_hours_per_week;
+                    
+                    if (data.status === 'Permanent') {
+                        // For Permanent: default is 18, but keep custom values if set
+                        maxHoursInput.value = (savedMaxHours && savedMaxHours > 18) ? savedMaxHours : 18;
+                    } else {
+                        // For Contractual/Temporary: default is 30, but keep custom values if set
+                        maxHoursInput.value = (savedMaxHours && savedMaxHours !== 18) ? savedMaxHours : 30;
+                    }
+                    
                     document.getElementById('edit_designation').value = data.designation || '';
                     document.getElementById('edit_designation_units').value = data.designation_units || 0;
                     document.getElementById('edit_research_extension').value = data.research_extension || '';
@@ -1349,6 +1552,7 @@ function getProgramName($pdo, $program_id) {
                     document.getElementById('edit_special_assignment').value = data.special_assignment || '';
                     document.getElementById('edit_special_assignment_units').value = data.special_assignment_units || 0;
                     document.getElementById('edit_rank').value = data.rank || '';
+                    document.getElementById('edit_major').value = data.specialization || '';
                     document.getElementById('edit_education').value = data.education || '';
                     document.getElementById('edit_eligibility').value = data.eligibility || '';
                     document.getElementById('edit_service_years').value = data.service_years || '';
@@ -1469,6 +1673,28 @@ function getProgramName($pdo, $program_id) {
                     filterInstructorRows();
                     instructorSearchInput.focus();
                 });
+            }
+        }
+    </script>
+
+    <script>
+        function updateMaxUnits() {
+            var status = document.getElementById('status').value;
+            var maxInput = document.getElementById('max_hours_per_week');
+            if (status === 'Permanent') {
+                maxInput.value = 18;  // Units: base 18 + up to 6 overload
+            } else {
+                maxInput.value = 30;  // Hours: Contractual/Temporary max 30 hours
+            }
+        }
+
+        function updateEditMaxUnits() {
+            var status = document.getElementById('edit_status').value;
+            var maxInput = document.getElementById('edit_max_hours');
+            if (status === 'Permanent') {
+                maxInput.value = 18;  // Units: base 18 + up to 6 overload
+            } else {
+                maxInput.value = 30;  // Hours: Contractual/Temporary max 30 hours
             }
         }
     </script>

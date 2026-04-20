@@ -51,6 +51,18 @@ function preferProgramSubjects(array $subjects): array {
 $selected_semester = normalizeSemester($_POST['semester'] ?? $_GET['semester'] ?? '1st Semester');
 $selected_schedule_mode = $_POST['schedule_mode'] ?? $_GET['schedule_mode'] ?? 'single';
 $selected_year_level = normalizeYearLevelSelection($_POST['year_level'] ?? $_GET['year_level'] ?? 1);
+$selected_job_name = trim((string)($_POST['job_name'] ?? $_GET['job_name'] ?? ''));
+if ($selected_job_name === '') {
+    $selected_job_name = 'Schedule Generation ' . date('Y-m-d H:i:s');
+}
+$selected_mirror_enabled = isset($_POST['mirror_enabled']);
+$selected_individual_weekdays_enabled = isset($_POST['weekday_mode_enabled']);
+$selected_non_mirror_enabled = !$selected_mirror_enabled && !$selected_individual_weekdays_enabled;
+$selected_pairing_mode = 'standard';
+$allowed_pairing_modes = ['standard'];
+$selected_non_mirror_mode = (string)($_POST['non_mirror_mode'] ?? '1') === '0' ? '0' : '1';
+$selected_allow_saturday = isset($_POST['allow_saturday']);
+$selected_avoid_back_to_back = isset($_POST['avoid_back_to_back']);
 
 // Get program chair's program
 $stmt = $pdo->prepare("
@@ -211,8 +223,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Saturday control
         $allow_saturday = isset($_POST['allow_saturday']);
-$mirror_mode = $_POST['mirror_mode'] ?? 'strict';
-$four_day_pattern = $mirror_mode !== 'none';
+        $mirror_enabled = isset($_POST['mirror_enabled']);
+$individual_weekdays_enabled = isset($_POST['weekday_mode_enabled']);
+if ($individual_weekdays_enabled) {
+    $mirror_enabled = false;
+}
+$pairing_mode = 'standard';
+$non_mirror_mode = (string)($_POST['non_mirror_mode'] ?? '1') === '0' ? 0 : 1;
+
+$mirror_pairs = [];
+if ($mirror_enabled) {
+    $pairs = [['Monday', 'Thursday'], ['Tuesday', 'Friday']];
+
+    foreach ($pairs as $p) {
+        $mirror_pairs[] = ['day' => $p[0], 'mirror' => $p[1]];
+    }
+}
+
+$four_day_pattern = !empty($mirror_pairs);
+$mirror_mode = $four_day_pattern ? 'strict' : 'none';
 
         // Filter time slots
         $filtered_time_slots = [];
@@ -239,18 +268,58 @@ $four_day_pattern = $mirror_mode !== 'none';
                 'max_classes_per_day' => $_POST['max_classes_per_day'] ?? 4,
                 'preferred_start_time' => $_POST['preferred_start_time'] ?? '08:00',
                 'avoid_back_to_back' => isset($_POST['avoid_back_to_back']),
-                'respect_availability' => isset($_POST['respect_availability']),
                 'allow_saturday' => $allow_saturday,
-'mirror_mode' => $mirror_mode,
-'four_day_pattern' => $four_day_pattern
+                'mirror_mode' => $mirror_mode,
+                'four_day_pattern' => $four_day_pattern,
+                'mirror_pairs' => $mirror_pairs,
+                'non_mirror_mode' => $non_mirror_mode,
+                'day_grouping_mode' => $individual_weekdays_enabled ? 'individual' : 'paired',
+                'individual_weekdays' => $individual_weekdays_enabled,
+                'allow_non_mirror_fallback' => $four_day_pattern ? true : false
             ]
         ];
 
         // Selected instructors
         $selected_instructor_ids = array_map('intval', $_POST['selected_instructors'] ?? []);
+
+        // Latest approved overload hours per instructor (if any).
+        $approved_overload_hours = [];
+        if (!empty($selected_instructor_ids)) {
+            try {
+                $placeholders = implode(',', array_fill(0, count($selected_instructor_ids), '?'));
+                $approvalStmt = $pdo->prepare("
+                    SELECT oa.instructor_id, oa.approved_hours
+                    FROM instructor_overload_approvals oa
+                    JOIN (
+                        SELECT instructor_id, MAX(created_at) AS latest_created_at
+                        FROM instructor_overload_approvals
+                        WHERE instructor_id IN ($placeholders)
+                        GROUP BY instructor_id
+                    ) latest
+                      ON latest.instructor_id = oa.instructor_id
+                     AND latest.latest_created_at = oa.created_at
+                ");
+                $approvalStmt->execute($selected_instructor_ids);
+                foreach ($approvalStmt->fetchAll(PDO::FETCH_ASSOC) as $approvalRow) {
+                    $aid = (int)($approvalRow['instructor_id'] ?? 0);
+                    if ($aid > 0) {
+                        $approved_overload_hours[$aid] = (float)($approvalRow['approved_hours'] ?? 0);
+                    }
+                }
+            } catch (Exception $e) {
+                // Table may not exist yet; keep generation usable.
+            }
+        }
+
         if (!empty($_POST['selected_instructors'])) {
             foreach ($instructors as $inst) {
                 if (in_array((int)$inst['id'], $selected_instructor_ids, true)) {
+                    $iid = (int)$inst['id'];
+                    $baseMaxHours = (float)($inst['max_hours_per_week'] ?? 0);
+                    $approvedMaxHours = (float)($approved_overload_hours[$iid] ?? 0);
+                    if ($approvedMaxHours > $baseMaxHours) {
+                        $inst['max_hours_per_week'] = $approvedMaxHours;
+                    }
                     $input_data['instructors'][] = $inst;
                 }
             }
@@ -320,15 +389,28 @@ $four_day_pattern = $mirror_mode !== 'none';
 
             $job_id = $pdo->lastInsertId();
 
-            // Run Python GA
-            $script_path = PYTHON_SCRIPT_PATH;
+            // Run Python solver (detached background process)
+            $script_path = realpath(PYTHON_SCRIPT_PATH) ?: PYTHON_SCRIPT_PATH;
+            $python_path = PYTHON_PATH;
+            $job_arg = (int)$job_id;
 
             if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
-                $script_path = '"' . str_replace('/', '\\', $script_path) . '"';
-                $command = PYTHON_PATH . ' ' . $script_path . ' ' . (int)$job_id;
-                pclose(popen("start /B cmd /c $command 1> nul 2>&1", "r"));
+                $log_dir = realpath(__DIR__ . '/../logs') ?: (__DIR__ . '/../logs');
+                if (!is_dir($log_dir)) {
+                    @mkdir($log_dir, 0777, true);
+                }
+                $log_file = $log_dir . DIRECTORY_SEPARATOR . 'job_' . $job_arg . '.log';
+
+                $python_arg = '"' . str_replace('"', '', str_replace('/', '\\', $python_path)) . '"';
+                $script_arg = '"' . str_replace('"', '', str_replace('/', '\\', $script_path)) . '"';
+                $log_arg = '"' . str_replace('"', '', str_replace('/', '\\', $log_file)) . '"';
+
+                // Redirect output to a log file for debugging (Apache can't show Python errors).
+                $command = "start \"\" /B $python_arg -u $script_arg $job_arg > $log_arg 2>&1";
+                pclose(popen($command, "r"));
             } else {
-                exec(PYTHON_PATH . ' ' . $script_path . ' ' . (int)$job_id . ' > /dev/null 2>&1 &');
+                $cmd = PYTHON_PATH . ' ' . escapeshellarg($script_path) . ' ' . $job_arg . ' > /dev/null 2>&1 &';
+                exec($cmd);
             }
 
             $message = "Schedule generation job '{$job_name}' has been started.";
@@ -393,7 +475,7 @@ $four_day_pattern = $mirror_mode !== 'none';
     <div class="form-group">
         <label>Job Name</label>
         <input type="text" name="job_name"
-               value="Schedule Generation <?= date('Y-m-d H:i:s') ?>" required>
+               value="<?php echo htmlspecialchars($selected_job_name); ?>" required>
     </div>
 
     <div class="form-group">
@@ -594,35 +676,57 @@ $four_day_pattern = $mirror_mode !== 'none';
 
     <div class="form-group checkbox">
         <label>
-            <input type="checkbox" name="avoid_back_to_back">
+            <input type="checkbox" name="avoid_back_to_back" <?php echo $selected_avoid_back_to_back ? 'checked' : ''; ?>>
             Avoid back-to-back classes
-        </label>
-    </div>
-
-    <div class="form-group checkbox">
-        <label>
-            <input type="checkbox" name="respect_availability" checked>
-            Respect instructor availability
         </label>
     </div>
 
     <!-- Saturday Control -->
     <div class="form-group checkbox">
         <label>
-            <input type="checkbox" name="allow_saturday">
+            <input type="checkbox" name="allow_saturday" <?php echo $selected_allow_saturday ? 'checked' : ''; ?>>
             Allow Saturday (Make-up Classes Only)
         </label>
     </div>
 
-    <div class="form-group">
-        <label>Day Pairing (Mon/Thu → Tue/Fri → 1 Wed/subject)</label>
-        <select name="pairing_mode" required>
-            <option value="standard">Standard (Mon/Thu + Tue/Fri + 1 Wed)</option>
-            <option value="mon_wed">Mon/Wed + Tue/Fri + 1 Thu</option>
-            <option value="mon_tue">Mon/Tue + Wed/Fri + 1 Thu</option>
-            <option value="flex_none">No Pairing (Free placement)</option>
-        </select>
+    <div class="form-group checkbox inline-checkbox-row">
+        <label class="inline-checkbox">
+            <input type="checkbox" id="mirror_enabled" name="mirror_enabled" <?php echo $selected_mirror_enabled ? 'checked' : ''; ?>>
+            Mirror mode
+        </label>
+        <label class="inline-checkbox">
+            <input type="checkbox" id="non_mirror_enabled" name="non_mirror_enabled" <?php echo $selected_non_mirror_enabled ? 'checked' : ''; ?>>
+            Non-mirror mode
+        </label>
+        <label class="inline-checkbox">
+            <input type="checkbox" id="weekday_mode_enabled" name="weekday_mode_enabled" <?php echo $selected_individual_weekdays_enabled ? 'checked' : ''; ?>>
+            Monday-Friday mode
+        </label>
     </div>
+
+    <div class="form-group" id="weekday_mode_help" style="display:none;">
+        <div style="padding: 10px 12px; background: #f8f9fa; border: 1px solid #d8dee6; border-radius: 8px;">
+            Classes will be generated without paired-day grouping, and reports will show Monday, Tuesday, Wednesday, Thursday, and Friday separately.
+        </div>
+    </div>
+
+        <div id="mirror_options" style="display:none;">
+        <div class="form-group">
+            <label>Day Pairing Pattern</label>
+            <select name="pairing_mode" id="pairing_mode_select">
+                <option value="standard" selected>Fixed: Monday -> Thursday, Tuesday -> Friday</option>
+            </select>
+         </div> 
+
+         <div class="form-group">
+             <label>Wednesday Behavior</label>
+             <select name="non_mirror_mode" id="non_mirror_mode_select">
+                 <option value="1" <?php echo $selected_non_mirror_mode === '1' ? 'selected' : ''; ?>>Up to 2 distinct subjects per section</option>
+                 <option value="0" <?php echo $selected_non_mirror_mode === '0' ? 'selected' : ''; ?>>No classes</option>
+             </select>
+         </div>
+     </div>
+</div>
 </div>
 
 <div class="form-actions">
@@ -648,6 +752,48 @@ document.getElementById('select_all_rooms').addEventListener('change', function(
     const checkboxes = document.querySelectorAll('.room-checkbox');
     checkboxes.forEach(cb => cb.checked = this.checked);
 });
+
+function syncMirrorOptionsVisibility() {
+    const mirrorBox = document.getElementById('mirror_enabled');
+    const nonMirrorBox = document.getElementById('non_mirror_enabled');
+    const weekdayBox = document.getElementById('weekday_mode_enabled');
+    const options = document.getElementById('mirror_options');
+    const weekdayHelp = document.getElementById('weekday_mode_help');
+    if (!mirrorBox || !nonMirrorBox || !weekdayBox || !options) {
+        return;
+    }
+
+    if (!mirrorBox.checked && !nonMirrorBox.checked && !weekdayBox.checked) {
+        nonMirrorBox.checked = true;
+    }
+    if (mirrorBox.checked) {
+        nonMirrorBox.checked = false;
+        weekdayBox.checked = false;
+    } else if (weekdayBox.checked) {
+        mirrorBox.checked = false;
+        nonMirrorBox.checked = false;
+    } else if (nonMirrorBox.checked) {
+        mirrorBox.checked = false;
+        weekdayBox.checked = false;
+    }
+
+    const show = mirrorBox.checked;
+    options.style.display = show ? 'block' : 'none';
+    if (weekdayHelp) {
+        weekdayHelp.style.display = weekdayBox.checked ? 'block' : 'none';
+    }
+    options.querySelectorAll('select,input,textarea').forEach(el => {
+        el.disabled = !show;
+    });
+}
+
+const mirrorBoxEl = document.getElementById('mirror_enabled');
+const nonMirrorBoxEl = document.getElementById('non_mirror_enabled');
+const weekdayBoxEl = document.getElementById('weekday_mode_enabled');
+if (mirrorBoxEl) mirrorBoxEl.addEventListener('change', syncMirrorOptionsVisibility);
+if (nonMirrorBoxEl) nonMirrorBoxEl.addEventListener('change', syncMirrorOptionsVisibility);
+if (weekdayBoxEl) weekdayBoxEl.addEventListener('change', syncMirrorOptionsVisibility);
+syncMirrorOptionsVisibility();
 
 function syncInstructorSubjectVisibility() {
     const selected = new Set(
@@ -675,6 +821,7 @@ if (instructorSearchInput) {
 }
 
 const semesterSelect = document.getElementById('semester_select');
+const jobNameInput = document.querySelector('input[name="job_name"]');
 if (semesterSelect) {
     semesterSelect.addEventListener('change', function () {
         const url = new URL(window.location.href);
@@ -682,6 +829,9 @@ if (semesterSelect) {
         const yearLevelSelectEl = document.getElementById('year_level_select');
         if (yearLevelSelectEl) {
             url.searchParams.set('year_level', yearLevelSelectEl.value);
+        }
+        if (jobNameInput) {
+            url.searchParams.set('job_name', jobNameInput.value);
         }
         window.location.href = url.toString();
     });
@@ -696,6 +846,9 @@ if (yearLevelSelect) {
             url.searchParams.set('semester', semesterSelectEl.value);
         }
         url.searchParams.set('year_level', yearLevelSelect.value);
+        if (jobNameInput) {
+            url.searchParams.set('job_name', jobNameInput.value);
+        }
         window.location.href = url.toString();
     });
 }
@@ -723,3 +876,4 @@ if (scheduleModeSelect) {
 
 </body>
 </html>
+

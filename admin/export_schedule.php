@@ -8,6 +8,7 @@ $job_id = $_GET['job_id'] ?? 0;
 $has_scheduled_minutes = false;
 try {
     $pdo->exec("ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours");
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN is_overload TINYINT(1) NOT NULL DEFAULT 0 AFTER is_published");
     $has_scheduled_minutes = true;
 } catch (Exception $e) {
     try {

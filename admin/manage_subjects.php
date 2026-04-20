@@ -17,6 +17,18 @@ try {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN subject_type ENUM('major','minor') NOT NULL DEFAULT 'major' AFTER department");
     }
 
+    if (!isset($subjectColumns['lecture_credits'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lecture_credits DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER credits");
+    }
+    if (!isset($subjectColumns['lab_credits'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_credits DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER lecture_credits");
+    }
+
+    $creditsType = strtolower((string)($subjectColumns['credits']['Type'] ?? ''));
+    if (strpos($creditsType, 'decimal') === false) {
+        $pdo->exec("ALTER TABLE subjects MODIFY credits DECIMAL(4,2) NOT NULL");
+    }
+
     $hoursType = strtolower((string)($subjectColumns['hours_per_week']['Type'] ?? ''));
     if (strpos($hoursType, 'decimal') === false) {
         $pdo->exec("ALTER TABLE subjects MODIFY hours_per_week DECIMAL(4,2) NOT NULL");
@@ -155,8 +167,34 @@ function normalizeNonNegativeHours($rawHours) {
     return round($hours, 2);
 }
 
+function normalizeCredits($rawCredits) {
+    $credits = round((float)($rawCredits ?? 0), 2);
+    if ($credits <= 0) {
+        return 0.00;
+    }
+    if ($credits > 6.00) {
+        $credits = 6.00;
+    }
+    return $credits;
+}
+
 function normalizeMinutes($rawMinutes) {
-    $minutes = (int)($rawMinutes ?? 0);
+    $value = trim((string)($rawMinutes ?? ''));
+    if ($value === '') {
+        return 0;
+    }
+
+    // Accept clock-like input such as "1:30" or "1;30" (1 hour 30 minutes).
+    if (strpos($value, ':') !== false || strpos($value, ';') !== false) {
+        $parts = preg_split('/[:;]/', $value);
+        $hoursPart = isset($parts[0]) ? (int)trim((string)$parts[0]) : 0;
+        $minutesPart = isset($parts[1]) ? (int)trim((string)$parts[1]) : 0;
+        $minutes = ($hoursPart * 60) + $minutesPart;
+    } else {
+        // Numeric fallback remains supported (e.g., "90").
+        $minutes = (int)round((float)$value);
+    }
+
     if ($minutes < 0) {
         $minutes = 0;
     }
@@ -185,11 +223,86 @@ function formatMinutesAsClock($minutes) {
     return sprintf('%d:%02d', $hours, $mins);
 }
 
-function computeSubjectTimeValues($subjectType, $meetingsPerWeek, $lectureMinutesPerMeeting, $labMinutesPerMeeting, $fallbackHoursPerWeek = null) {
+function computeSubjectTimeValues($subjectType, $meetingsPerWeek, $lectureMinutesPerMeeting, $labMinutesPerMeeting, $fallbackHoursPerWeek = null, $credits = null, $programCode = '') {
     $subjectType = strtolower((string)$subjectType);
-    $meetingsPerWeek = normalizeMeetingsPerWeek($meetingsPerWeek);
+    $meetingsPerWeek = 1;
     $lectureMinutesPerMeeting = normalizeMinutes($lectureMinutesPerMeeting);
     $labMinutesPerMeeting = normalizeMinutes($labMinutesPerMeeting);
+    $creditsValue = round((float)($credits ?? 0), 2);
+    $programCode = strtoupper(trim((string)$programCode));
+
+    $enforceOneUnitOneHourRule = (
+        $subjectType === 'minor'
+        && $creditsValue === 1.00
+        && in_array($programCode, ['CS', 'IT', 'CPE'], true)
+    );
+
+    if ($enforceOneUnitOneHourRule) {
+        // Core guide rule: for CS/IT/CPE minor (general) subjects with 1 unit, use exactly 1 hour/week.
+        $weeklyLectureMinutes = 60;
+        $weeklyLabMinutes = 0;
+        $lectureMinutesPerMeeting = $weeklyLectureMinutes;
+        $labMinutesPerMeeting = 0;
+        $weeklyTotalMinutes = $weeklyLectureMinutes;
+
+        return [
+            'meetings_per_week' => $meetingsPerWeek,
+            'lecture_minutes_per_meeting' => $lectureMinutesPerMeeting,
+            'lab_minutes_per_meeting' => $labMinutesPerMeeting,
+            'hours_per_week' => minutesToDecimalHours($weeklyTotalMinutes),
+            'lecture_hours' => minutesToDecimalHours($weeklyLectureMinutes),
+            'lab_hours' => minutesToDecimalHours($weeklyLabMinutes),
+            'weekly_total_minutes' => $weeklyTotalMinutes,
+        ];
+    }
+
+    $enforceCsItMajorThreeUnitRule = (
+        $subjectType === 'major'
+        && $creditsValue === 3.00
+        && in_array($programCode, ['CS', 'IT'], true)
+    );
+    if ($enforceCsItMajorThreeUnitRule) {
+        // Core guide rule for CS/IT major subjects: 1 unit lecture = 2 hours, 2 units laboratory = 3 hours.
+        $weeklyLectureMinutes = 120;
+        $weeklyLabMinutes = 180;
+        $lectureMinutesPerMeeting = $weeklyLectureMinutes;
+        $labMinutesPerMeeting = $weeklyLabMinutes;
+        $weeklyTotalMinutes = $weeklyLectureMinutes + $weeklyLabMinutes;
+
+        return [
+            'meetings_per_week' => $meetingsPerWeek,
+            'lecture_minutes_per_meeting' => $lectureMinutesPerMeeting,
+            'lab_minutes_per_meeting' => $labMinutesPerMeeting,
+            'hours_per_week' => minutesToDecimalHours($weeklyTotalMinutes),
+            'lecture_hours' => minutesToDecimalHours($weeklyLectureMinutes),
+            'lab_hours' => minutesToDecimalHours($weeklyLabMinutes),
+            'weekly_total_minutes' => $weeklyTotalMinutes,
+        ];
+    }
+
+    $enforceCpeMajorFourUnitRule = (
+        $subjectType === 'major'
+        && $creditsValue === 4.00
+        && $programCode === 'CPE'
+    );
+    if ($enforceCpeMajorFourUnitRule) {
+        // Core guide rule for CPE major subjects: lecture 1 hour + laboratory 3 hours = 4 total hours.
+        $weeklyLectureMinutes = 60;
+        $weeklyLabMinutes = 180;
+        $lectureMinutesPerMeeting = $weeklyLectureMinutes;
+        $labMinutesPerMeeting = $weeklyLabMinutes;
+        $weeklyTotalMinutes = $weeklyLectureMinutes + $weeklyLabMinutes;
+
+        return [
+            'meetings_per_week' => $meetingsPerWeek,
+            'lecture_minutes_per_meeting' => $lectureMinutesPerMeeting,
+            'lab_minutes_per_meeting' => $labMinutesPerMeeting,
+            'hours_per_week' => minutesToDecimalHours($weeklyTotalMinutes),
+            'lecture_hours' => minutesToDecimalHours($weeklyLectureMinutes),
+            'lab_hours' => minutesToDecimalHours($weeklyLabMinutes),
+            'weekly_total_minutes' => $weeklyTotalMinutes,
+        ];
+    }
 
     if ($subjectType === 'minor') {
         if ($lectureMinutesPerMeeting <= 0) {
@@ -200,14 +313,14 @@ function computeSubjectTimeValues($subjectType, $meetingsPerWeek, $lectureMinute
         $lectureMinutesPerMeeting = 120;
     }
 
-    $weeklyLectureMinutes = $lectureMinutesPerMeeting * $meetingsPerWeek;
-    $weeklyLabMinutes = $labMinutesPerMeeting * $meetingsPerWeek;
+    $weeklyLectureMinutes = $lectureMinutesPerMeeting;
+    $weeklyLabMinutes = $labMinutesPerMeeting;
     $weeklyTotalMinutes = $weeklyLectureMinutes + $weeklyLabMinutes;
 
     if ($weeklyTotalMinutes <= 0 && $fallbackHoursPerWeek !== null && $fallbackHoursPerWeek !== '') {
         $weeklyTotalMinutes = max(0, (int)round(((float)$fallbackHoursPerWeek) * 60));
         $weeklyLectureMinutes = $weeklyTotalMinutes;
-        $lectureMinutesPerMeeting = (int)round($weeklyLectureMinutes / max($meetingsPerWeek, 1));
+        $lectureMinutesPerMeeting = $weeklyLectureMinutes;
         $weeklyLabMinutes = 0;
         $labMinutesPerMeeting = 0;
     }
@@ -394,45 +507,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['add_subject'])) {
         $subject_code = $_POST['subject_code'];
         $subject_name = $_POST['subject_name'];
-        $credits = $_POST['credits'];
+        $lecture_credits = (float)($_POST['lecture_credits'] ?? 0);
+        $lab_credits = (float)($_POST['lab_credits'] ?? 0);
+        $credits = normalizeCredits($lecture_credits + $lab_credits);
         [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
         $semester = normalizeSemester($_POST['semester'] ?? '1st Semester');
         $year_level = normalizeYearLevel($_POST['year_level'] ?? 1);
         $prerequisites = trim((string)($_POST['prerequisites'] ?? ''));
+        $preferred_day_pair = trim((string)($_POST['preferred_day_pair'] ?? ''));
+        if ($preferred_day_pair === '') {
+            $preferred_day_pair = null;
+        }
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
         $timeValues = computeSubjectTimeValues(
             $subject_type,
-            $_POST['meetings_per_week'] ?? 2,
+            1,
             $_POST['lecture_minutes_per_meeting'] ?? 0,
             $_POST['lab_minutes_per_meeting'] ?? 0,
-            $_POST['hours_per_week'] ?? null
+            $_POST['hours_per_week'] ?? null,
+            $credits,
+            resolveProgramCodeFromValue($programNameById[$program_id] ?? $department)
         );
         
-        try {
-            $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, department, program_id, subject_type, semester, year_level, prerequisites, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->execute([
-                $subject_code,
-                $subject_name,
-                $credits,
-                $department,
-                $program_id,
-                $subject_type,
-                $semester,
-                $year_level,
-                $prerequisites,
-                $timeValues['hours_per_week'],
-                $timeValues['lecture_hours'],
-                $timeValues['lab_hours'],
-                $timeValues['meetings_per_week'],
-                $timeValues['lecture_minutes_per_meeting'],
-                $timeValues['lab_minutes_per_meeting'],
-            ]);
-            $message = "Subject added successfully!";
-        } catch (Exception $e) {
-            $error = "Error adding subject: " . $e->getMessage();
+        if ($credits <= 0) {
+            $error = "Credits/units must be greater than 0.";
+        } else {
+            try {
+                $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, lecture_credits, lab_credits, department, program_id, subject_type, semester, year_level, preferred_day_pair, prerequisites, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->execute([
+                    $subject_code,
+                    $subject_name,
+                    $credits,
+                    $lecture_credits,
+                    $lab_credits,
+                    $department,
+                    $program_id,
+                    $subject_type,
+                    $semester,
+                    $year_level,
+                    $preferred_day_pair,
+                    $prerequisites,
+                    $timeValues['hours_per_week'],
+                    $timeValues['lecture_hours'],
+                    $timeValues['lab_hours'],
+                    $timeValues['meetings_per_week'],
+                    $timeValues['lecture_minutes_per_meeting'],
+                    $timeValues['lab_minutes_per_meeting'],
+                ]);
+                $message = "Subject added successfully!";
+            } catch (Exception $e) {
+                $error = "Error adding subject: " . $e->getMessage();
+            }
         }
     }
     
@@ -440,46 +568,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = $_POST['subject_id'];
         $subject_code = $_POST['subject_code'];
         $subject_name = $_POST['subject_name'];
-        $credits = $_POST['credits'];
+        $lecture_credits = (float)($_POST['lecture_credits'] ?? 0);
+        $lab_credits = (float)($_POST['lab_credits'] ?? 0);
+        $credits = normalizeCredits($lecture_credits + $lab_credits);
         [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
         $semester = normalizeSemester($_POST['semester'] ?? '1st Semester');
         $year_level = normalizeYearLevel($_POST['year_level'] ?? 1);
         $prerequisites = trim((string)($_POST['prerequisites'] ?? ''));
+        $preferred_day_pair = trim((string)($_POST['preferred_day_pair'] ?? ''));
+        if ($preferred_day_pair === '') {
+            $preferred_day_pair = null;
+        }
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
         $timeValues = computeSubjectTimeValues(
             $subject_type,
-            $_POST['meetings_per_week'] ?? 2,
+            1,
             $_POST['lecture_minutes_per_meeting'] ?? 0,
             $_POST['lab_minutes_per_meeting'] ?? 0,
-            $_POST['hours_per_week'] ?? null
+            $_POST['hours_per_week'] ?? null,
+            $credits,
+            resolveProgramCodeFromValue($programNameById[$program_id] ?? $department)
         );
         
-        try {
-            $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
-            $stmt->execute([
-                $subject_code,
-                $subject_name,
-                $credits,
-                $department,
-                $program_id,
-                $subject_type,
-                $semester,
-                $year_level,
-                $prerequisites,
-                $timeValues['hours_per_week'],
-                $timeValues['lecture_hours'],
-                $timeValues['lab_hours'],
-                $timeValues['meetings_per_week'],
-                $timeValues['lecture_minutes_per_meeting'],
-                $timeValues['lab_minutes_per_meeting'],
-                $id
-            ]);
-            $message = "Subject updated successfully!";
-        } catch (Exception $e) {
-            $error = "Error updating subject: " . $e->getMessage();
+        if ($credits <= 0) {
+            $error = "Credits/units must be greater than 0.";
+        } else {
+            try {
+                $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, lecture_credits = ?, lab_credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, preferred_day_pair = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
+                $stmt->execute([
+                    $subject_code,
+                    $subject_name,
+                    $credits,
+                    $lecture_credits,
+                    $lab_credits,
+                    $department,
+                    $program_id,
+                    $subject_type,
+                    $semester,
+                    $year_level,
+                    $preferred_day_pair,
+                    $prerequisites,
+                    $timeValues['hours_per_week'],
+                    $timeValues['lecture_hours'],
+                    $timeValues['lab_hours'],
+                    $timeValues['meetings_per_week'],
+                    $timeValues['lecture_minutes_per_meeting'],
+                    $timeValues['lab_minutes_per_meeting'],
+                    $id
+                ]);
+                $message = "Subject updated successfully!";
+            } catch (Exception $e) {
+                $error = "Error updating subject: " . $e->getMessage();
+            }
         }
     }
     
@@ -597,7 +740,9 @@ foreach ($subjects as &$subject) {
             $meetingCount,
             0,
             0,
-            $subject['hours_per_week'] ?? 0
+            $subject['hours_per_week'] ?? 0,
+            $subject['credits'] ?? 0,
+            resolveSubjectProgramCode($subject)
         );
         $meetingCount = $fallback['meetings_per_week'];
         $lectureMinutesPerMeeting = $fallback['lecture_minutes_per_meeting'];
@@ -663,15 +808,170 @@ if ($selectedSemester !== '') {
             background-color: rgba(0,0,0,0.5);
         }
         
-        .modal-content {
-            background-color: white;
-            margin: 50px auto;
-            padding: 20px;
-            border-radius: 8px;
-            width: 80%;
-            max-width: 600px;
-            max-height: 80vh;
+        .manage-subjects-modal .modal-content {
+            background: white;
+            margin: 2% auto;
+            padding: 35px;
+            border-radius: 16px;
+            width: min(96%, 980px);
+            max-width: 980px;
+            max-height: 92vh;
             overflow-y: auto;
+            box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+        }
+        
+        .manage-subjects-modal .modal-content h2 {
+            font-size: 28px;
+            margin-bottom: 25px;
+            color: #1e293b;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 12px;
+        }
+        
+        /* New Edit Modal Styles */
+        .edit-form,
+        .edit-form-layout,
+        .edit-form-main,
+        .edit-form-side {
+            width: 100%;
+        }
+
+        .edit-form-layout {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .edit-form-main,
+        .edit-form-side {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            min-width: 0;
+        }
+
+        .edit-form-section {
+            background: linear-gradient(180deg, #ffffff, #f8fafc);
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+        
+        .edit-form-section h3 {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0 0 18px 0;
+            color: #1e293b;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px 22px;
+        }
+        
+        .form-full {
+            grid-column: 1 / -1;
+        }
+        
+        .time-breakdown {
+            border: 1px solid #bfdbfe;
+            border-radius: 12px;
+            padding: 18px;
+            background: linear-gradient(180deg, #eff6ff, #dbeafe);
+        }
+
+        .computed-total {
+            background: #ecfdf5;
+            border: 1px solid #a7f3d0;
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .computed-total input {
+            background: #f0fdf4 !important;
+            border-color: #86efac !important;
+            font-weight: 700;
+            color: #059669 !important;
+        }
+
+        .units-display {
+            font-weight: normal;
+            color: #6b7280;
+            font-size: 0.9em;
+        }
+        
+        .form-actions {
+            display: flex;
+            justify-content: stretch;
+        }
+
+        .form-actions .btn-primary {
+            width: 100%;
+            justify-content: center;
+            padding: 16px 18px;
+            font-size: 16px;
+            font-weight: 700;
+            border-radius: 12px;
+            box-shadow: 0 12px 24px rgba(59, 130, 246, 0.22);
+        }
+
+        @media (max-width: 900px) {
+            .edit-form-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .form-row,
+            .edit-form-side .form-row,
+            .edit-form-main .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .form-group label {
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 15px;
+            color: #374151;
+        }
+        
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            padding: 14px 16px;
+            border: 1px solid #d1d5db;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+
+        .edit-form-section .form-group {
+            width: 100%;
+        }
+
+        .edit-form-side .form-row,
+        .edit-form-main .form-row {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,0.1);
         }
         
         .close {
@@ -1000,6 +1300,7 @@ if ($selectedSemester !== '') {
                     <th>Program</th>
                     <th>Assigned Instructor</th>
                     <th>Year</th>
+                    <th>Preferred Days</th>
                     <th>Semester</th>
                     <th>Type</th>
                     <th>Credits</th>
@@ -1026,6 +1327,18 @@ if ($selectedSemester !== '') {
                     <td><?php echo htmlspecialchars($subject['program_display_name'] ?? $subject['department']); ?></td>
                     <td><?php echo htmlspecialchars($subject['assigned_instructor_names_text']); ?></td>
                     <td><?php echo htmlspecialchars((string)($subject['year_level'] ?? 1)); ?></td>
+                    <td><?php 
+                        $preferred = $subject['preferred_day_pair'] ?? '';
+                        if ($preferred === 'monday-thursday') {
+                            echo 'Mon/Thu';
+                        } elseif ($preferred === 'tuesday-friday') {
+                            echo 'Tue/Fri';
+                        } elseif ($preferred === 'wednesday') {
+                            echo 'Wed';
+                        } else {
+                            echo '-';
+                        }
+                    ?></td>
                     <td><?php echo htmlspecialchars($subject['normalized_semester'] ?? '1st Semester'); ?></td>
                     <td><?php echo ucfirst(htmlspecialchars($subject['subject_type'] ?? 'major')); ?></td>
                     <td><?php echo $subject['credits']; ?></td>
@@ -1054,7 +1367,7 @@ if ($selectedSemester !== '') {
     </div>
     
     <!-- Add Subject Modal -->
-    <div id="addSubjectModal" class="modal">
+    <div id="addSubjectModal" class="modal manage-subjects-modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('addSubjectModal')">&times;</span>
             <h2>Add New Subject</h2>
@@ -1082,11 +1395,6 @@ if ($selectedSemester !== '') {
                 </div>
                 
                 <div class="form-group">
-                    <label for="credits">Credits:</label>
-                    <input type="number" id="credits" name="credits" min="1" max="6" required>
-                </div>
-
-                <div class="form-group">
                     <label for="subject_type">Subject Type:</label>
                     <select id="subject_type" name="subject_type" required>
                         <option value="major" selected>Major</option>
@@ -1113,28 +1421,46 @@ if ($selectedSemester !== '') {
                     </select>
                 </div>
                 <div class="form-group">
+                    <label for="preferred_day_pair">Preferred Day Pair:</label>
+                    <select id="preferred_day_pair" name="preferred_day_pair">
+                        <option value="">No Preference</option>
+                        <option value="monday-thursday">Monday-Thursday</option>
+                        <option value="tuesday-friday">Tuesday-Friday</option>
+                        <option value="wednesday">Wednesday</option>
+                        <option value="monday-thursday-tuesday-friday">Monday=Thursday + Tuesday=Friday (Require if 3 or more Section/Block)</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label for="prerequisites">Prerequisites:</label>
                     <input type="text" id="prerequisites" name="prerequisites" placeholder="Optional prerequisite text">
                 </div>
 
                 <div id="add_major_breakdown">
-                    <div class="form-group">
-                        <label for="meetings_per_week">Meetings Per Week:</label>
-                        <input type="number" id="meetings_per_week" name="meetings_per_week" min="1" max="7" step="1" value="2">
+                    <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div class="form-group">
+                            <label for="lecture_minutes_per_meeting">Lecture Time (H:MM):</label>
+                            <input type="text" id="lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" value="2:00" placeholder="e.g. 1:30 or 90">
+                        </div>
+                        <div class="form-group">
+                            <label for="lecture_credits">Lecture Units:</label>
+                            <input type="number" id="lecture_credits" name="lecture_credits" min="0" max="6" step="0.5" value="3" required>
+                        </div>
                     </div>
-                    <div class="form-group">
-                        <label for="lecture_minutes_per_meeting">Lecture Per Meeting (minutes):</label>
-                        <input type="number" id="lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" min="0" max="600" step="5" value="120">
-                    </div>
-                    <div class="form-group">
-                        <label for="lab_minutes_per_meeting">Laboratory Per Meeting (minutes):</label>
-                        <input type="number" id="lab_minutes_per_meeting" name="lab_minutes_per_meeting" min="0" max="600" step="5" value="0">
+                    <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div class="form-group">
+                            <label for="lab_minutes_per_meeting">Laboratory Time (H:MM):</label>
+                            <input type="text" id="lab_minutes_per_meeting" name="lab_minutes_per_meeting" value="0:00" placeholder="e.g. 1:30 or 90">
+                        </div>
+                        <div class="form-group">
+                            <label for="lab_credits">Laboratory Units:</label>
+                            <input type="number" id="lab_credits" name="lab_credits" min="0" max="6" step="0.5" value="0" required>
+                        </div>
                     </div>
                 </div>
-                
+
                 <div class="form-group">
-                    <label for="hours_per_week">Weekly Total:</label>
-                    <input type="text" id="hours_per_week" name="hours_per_week" value="4:00" readonly>
+                    <label for="hours_per_week">Total Hours and Units:</label>
+                    <input type="text" id="hours_per_week" name="hours_per_week" value="2:00 (3.00 units)" readonly>
                 </div>
                 
                 <button type="submit" name="add_subject" class="btn-primary">Add Subject</button>
@@ -1143,113 +1469,160 @@ if ($selectedSemester !== '') {
     </div>
     
     <!-- Add Department Modal -->
-    <div id="addDepartmentModal" class="modal">
+    <div id="addDepartmentModal" class="modal manage-subjects-modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('addDepartmentModal')">&times;</span>
             <h2>Add New Program</h2>
-            <form method="POST">
-                <div class="form-group">
-                    <label for="dept_name">Program Name:</label>
-                    <input type="text" id="dept_name" name="dept_name" required placeholder="e.g., Computer Science">
+            <form method="POST" class="edit-form">
+                <div class="edit-form-layout">
+                    <div class="edit-form-main">
+                        <div class="edit-form-section">
+                            <h3>🏫 Program Details</h3>
+                            <div class="form-row">
+                                <div class="form-group form-full">
+                                    <label for="dept_name">Program Name:</label>
+                                    <input type="text" id="dept_name" name="dept_name" required placeholder="e.g., Computer Science">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="dept_code">Program Code:</label>
+                                    <input type="text" id="dept_code" name="dept_code" required maxlength="10" placeholder="e.g., CS">
+                                </div>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" name="add_department" class="btn-primary">Add Program</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                
-                <div class="form-group">
-                    <label for="dept_code">Program Code:</label>
-                    <input type="text" id="dept_code" name="dept_code" required placeholder="e.g., CS">
-                </div>
-                
-                <button type="submit" name="add_department" class="btn-primary">Add Program</button>
             </form>
         </div>
     </div>
     
     <!-- Edit Subject Modal -->
-    <div id="editSubjectModal" class="modal">
+    <div id="editSubjectModal" class="modal manage-subjects-modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal('editSubjectModal')">&times;</span>
             <h2>Edit Subject</h2>
-            <form method="POST" id="editSubjectForm">
+            
+            <form method="POST" id="editSubjectForm" class="edit-form">
                 <input type="hidden" id="edit_subject_id" name="subject_id">
-                
-                <div class="form-group">
-                    <label for="edit_subject_code">Subject Code:</label>
-                    <input type="text" id="edit_subject_code" name="subject_code" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_subject_name">Subject Name:</label>
-                    <input type="text" id="edit_subject_name" name="subject_name" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_program_id">Program:</label>
-                    <select id="edit_program_id" name="program_id" required>
-                        <option value="all">All Programs</option>
-                        <?php foreach ($programs as $program): ?>
-                        <option value="<?php echo (int)$program['id']; ?>">
-                            <?php echo htmlspecialchars($program['program_name']); ?>
-                        </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label for="edit_credits">Credits:</label>
-                    <input type="number" id="edit_credits" name="credits" min="1" max="6" required>
-                </div>
 
-                <div class="form-group">
-                    <label for="edit_subject_type">Subject Type:</label>
-                    <select id="edit_subject_type" name="subject_type" required>
-                        <option value="major">Major</option>
-                        <option value="minor">Minor</option>
-                    </select>
-                </div>
+                <div class="edit-form-layout">
+                    <div class="edit-form-main">
+                        <!-- Basic Information Section -->
+                        <div class="edit-form-section">
+                            <h3>📚 Basic Information</h3>
+                            <div class="form-row">
+                                <div class="form-group form-full">
+                                    <label for="edit_subject_code">Subject Code:</label>
+                                    <input type="text" id="edit_subject_code" name="subject_code" required>
+                                </div>
+                            </div>
+                            </div>
+                            <div class="form-group form-full">
+                                <label for="edit_subject_name">Subject Name:</label>
+                                <input type="text" id="edit_subject_name" name="subject_name" required>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_program_id">Program:</label>
+                                    <select id="edit_program_id" name="program_id" required>
+                                        <option value="all">All Programs</option>
+                                        <?php foreach ($programs as $program): ?>
+                                        <option value="<?php echo (int)$program['id']; ?>">
+                                            <?php echo htmlspecialchars($program['program_name']); ?>
+                                        </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_subject_type">Type (Major/Minor):</label>
+                                    <select id="edit_subject_type" name="subject_type" required>
+                                        <option value="major">Major</option>
+                                        <option value="minor">Minor</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
 
-                <div class="form-group">
-                    <label for="edit_semester">Semester:</label>
-                    <select id="edit_semester" name="semester" required>
-                        <option value="1st Semester">1st Semester</option>
-                        <option value="2nd Semester">2nd Semester</option>
-                        <option value="Summer">Summer</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="edit_year_level">Year Level:</label>
-                    <select id="edit_year_level" name="year_level" required>
-                        <option value="1">1st Year</option>
-                        <option value="2">2nd Year</option>
-                        <option value="3">3rd Year</option>
-                        <option value="4">4th Year</option>
-                        <option value="5">5th Year</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="edit_prerequisites">Prerequisites:</label>
-                    <input type="text" id="edit_prerequisites" name="prerequisites">
-                </div>
+                        <!-- Time Breakdown Section -->
+                        <div class="edit-form-section">
+                            <h3>🕐 Time Breakdown</h3>
+                            <div id="edit_major_breakdown">
+                                <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                    <div class="form-group">
+                                        <label for="edit_lecture_minutes_per_meeting">Lecture Time (H:MM):</label>
+                                        <input type="text" id="edit_lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" value="2:00">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="edit_lecture_credits">Lecture Units:</label>
+                                        <input type="number" id="edit_lecture_credits" name="lecture_credits" min="0" max="6" step="0.5" required>
+                                    </div>
+                                </div>
+                                <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                    <div class="form-group">
+                                        <label for="edit_lab_minutes_per_meeting">Laboratory Time (H:MM):</label>
+                                        <input type="text" id="edit_lab_minutes_per_meeting" name="lab_minutes_per_meeting" value="0:00">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="edit_lab_credits">Laboratory Units:</label>
+                                        <input type="number" id="edit_lab_credits" name="lab_credits" min="0" max="6" step="0.5" required>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="form-group form-full computed-total" style="margin-top: 15px;">
+                                <label for="edit_hours_per_week">Total Hours and Units:</label>
+                                <input type="text" id="edit_hours_per_week" name="hours_per_week" readonly>
+                            </div>
+                        </div>
 
-                <div id="edit_major_breakdown">
-                    <div class="form-group">
-                        <label for="edit_meetings_per_week">Meetings Per Week:</label>
-                        <input type="number" id="edit_meetings_per_week" name="meetings_per_week" min="1" max="7" step="1" value="2">
-                    </div>
-                    <div class="form-group">
-                        <label for="edit_lecture_minutes_per_meeting">Lecture Per Meeting (minutes):</label>
-                        <input type="number" id="edit_lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" min="0" max="600" step="5" value="120">
-                    </div>
-                    <div class="form-group">
-                        <label for="edit_lab_minutes_per_meeting">Laboratory Per Meeting (minutes):</label>
-                        <input type="number" id="edit_lab_minutes_per_meeting" name="lab_minutes_per_meeting" min="0" max="600" step="5" value="0">
+                        <div class="edit-form-section">
+                            <h3>⏰ Details Scheduling</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_semester">Semester:</label>
+                                    <select id="edit_semester" name="semester" required>
+                                        <option value="1st Semester">1st Semester</option>
+                                        <option value="2nd Semester">2nd Semester</option>
+                                        <option value="Summer">Summer</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_year_level">Year Level:</label>
+                                    <select id="edit_year_level" name="year_level" required>
+                                        <option value="1">1st Year</option>
+                                        <option value="2">2nd Year</option>
+                                        <option value="3">3rd Year</option>
+                                        <option value="4">4th Year</option>
+                                        <option value="5">5th Year</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="edit_preferred_day_pair">Preferred Days:</label>
+                                    <select id="edit_preferred_day_pair" name="preferred_day_pair">
+                                        <option value="">No Preference</option>
+                                        <option value="monday-thursday">Monday-Thursday</option>
+                                        <option value="tuesday-friday">Tuesday-Friday</option>
+                                        <option value="wednesday">Wednesday</option>
+                                        <option value="monday-thursday-tuesday-friday">Monday=Thursday + Tuesday=Friday (Require if 3 or more Section/Block)</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_prerequisites">Prerequisites:</label>
+                                    <input type="text" id="edit_prerequisites" name="prerequisites">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" name="edit_subject" class="btn-primary">💾 Update Subject</button>
+                        </div>
                     </div>
                 </div>
-                
-                <div class="form-group">
-                    <label for="edit_hours_per_week">Weekly Total:</label>
-                    <input type="text" id="edit_hours_per_week" name="hours_per_week" readonly>
-                </div>
-                
-                <button type="submit" name="edit_subject" class="btn-primary">Update Subject</button>
             </form>
         </div>
     </div>
@@ -1293,12 +1666,55 @@ if ($selectedSemester !== '') {
     <script>
         const assignableInstructorsById = <?php echo json_encode(array_map('strval', $instructorNameById), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>;
 
-        function getDefaultSubjectPattern(typeValue) {
+        function getProgramCodeFromSelect(programSelectEl) {
+            if (!programSelectEl) {
+                return 'OTHER';
+            }
+            const selectedOption = programSelectEl.options[programSelectEl.selectedIndex];
+            const normalizedText = normalizeProgramOptionLabel(selectedOption ? selectedOption.textContent : '');
+            const normalizedValue = normalizeProgramOptionLabel(programSelectEl.value || '');
+            const tokens = [normalizedText, normalizedValue];
+            if (tokens.some(token => ['cs', 'computerscience', 'bscs', 'bscomputerscience'].includes(token))) {
+                return 'CS';
+            }
+            if (tokens.some(token => ['it', 'informationtechnology', 'bsit', 'bsinformationtechnology'].includes(token))) {
+                return 'IT';
+            }
+            if (tokens.some(token => ['cpe', 'computerengineering', 'bscpe', 'bscomputerengineering'].includes(token))) {
+                return 'CPE';
+            }
+            return 'OTHER';
+        }
+
+        function getDefaultSubjectPattern(typeValue, creditsValue, programCode) {
+            const credits = parseFloat(creditsValue || 0);
+            const normalizedProgram = String(programCode || '').toUpperCase();
             if (typeValue === 'minor') {
+                if (credits === 1 && ['CS', 'IT', 'CPE'].includes(normalizedProgram)) {
+                    return {
+                        meetingsPerWeek: 2,
+                        lectureMinutes: 30,
+                        labMinutes: 0,
+                    };
+                }
                 return {
                     meetingsPerWeek: 2,
                     lectureMinutes: 90,
                     labMinutes: 0,
+                };
+            }
+            if (typeValue === 'major' && credits === 3 && ['CS', 'IT'].includes(normalizedProgram)) {
+                return {
+                    meetingsPerWeek: 2,
+                    lectureMinutes: 60,
+                    labMinutes: 90,
+                };
+            }
+            if (typeValue === 'major' && credits === 4 && normalizedProgram === 'CPE') {
+                return {
+                    meetingsPerWeek: 2,
+                    lectureMinutes: 30,
+                    labMinutes: 90,
                 };
             }
             return {
@@ -1316,10 +1732,17 @@ if ($selectedSemester !== '') {
             hoursEl.readOnly = true;
             const prefix = typeEl.id && typeEl.id.startsWith('edit_') ? 'edit_' : '';
             const labEl = document.getElementById(`${prefix}lab_minutes_per_meeting`);
+            const labCreditsEl = document.getElementById(`${prefix}lab_credits`);
             if (labEl) {
                 labEl.disabled = typeEl.value === 'minor';
                 if (typeEl.value === 'minor') {
-                    labEl.value = '0';
+                    labEl.value = '0:00';
+                }
+            }
+            if (labCreditsEl) {
+                labCreditsEl.disabled = typeEl.value === 'minor';
+                if (typeEl.value === 'minor') {
+                    labCreditsEl.value = '0';
                 }
             }
         }
@@ -1331,34 +1754,55 @@ if ($selectedSemester !== '') {
             return `${hours}:${String(mins).padStart(2, '0')}`;
         }
 
-        function syncMajorTotal(meetingsEl, lectureEl, labEl, hoursEl) {
-            if (!meetingsEl || !lectureEl || !labEl || !hoursEl) {
-                return;
+        function parseDurationToMinutes(rawValue) {
+            const text = String(rawValue || '').trim();
+            if (!text) {
+                return 0;
             }
-            const meetings = parseInt(meetingsEl.value || 0, 10);
-            const lec = parseInt(lectureEl.value || 0, 10);
-            const lab = parseInt(labEl.value || 0, 10);
-            const total = (Number.isNaN(meetings) ? 0 : meetings) * ((Number.isNaN(lec) ? 0 : lec) + (Number.isNaN(lab) ? 0 : lab));
-            hoursEl.value = formatClockMinutes(total);
+            if (text.includes(':') || text.includes(';')) {
+                const parts = text.split(/[:;]/);
+                const hours = parseInt(parts[0] || '0', 10);
+                const mins = parseInt(parts[1] || '0', 10);
+                const safeHours = Number.isNaN(hours) ? 0 : hours;
+                const safeMins = Number.isNaN(mins) ? 0 : mins;
+                return Math.max(0, (safeHours * 60) + safeMins);
+            }
+            const numeric = parseFloat(text);
+            if (Number.isNaN(numeric)) {
+                return 0;
+            }
+            return Math.max(0, Math.round(numeric));
         }
 
-        function syncHoursDefault(typeEl, hoursEl, meetingsEl, lectureEl, labEl) {
-            if (!typeEl || !hoursEl || !meetingsEl || !lectureEl || !labEl) {
+        function syncMajorTotal(prefix = '') {
+            const lectureEl = document.getElementById(`${prefix}lecture_minutes_per_meeting`);
+            const labEl = document.getElementById(`${prefix}lab_minutes_per_meeting`);
+            const hoursEl = document.getElementById(`${prefix}hours_per_week`);
+            const lecCredits = parseFloat(document.getElementById(`${prefix}lecture_credits`)?.value || 0);
+            const labCredits = parseFloat(document.getElementById(`${prefix}lab_credits`)?.value || 0);
+
+            if (!lectureEl || !labEl || !hoursEl) return;
+
+            const lec = parseDurationToMinutes(lectureEl.value);
+            const lab = parseDurationToMinutes(labEl.value);
+            const totalMinutes = lec + lab;
+            const totalUnits = lecCredits + labCredits;
+
+            hoursEl.value = `${formatClockMinutes(totalMinutes)} (${totalUnits.toFixed(2)} units)`;
+        }
+
+        function syncHoursDefault(typeEl, hoursEl, meetingsEl, lectureEl, labEl, creditsEl, programSelectEl) {
+            if (!typeEl || !hoursEl || !lectureEl || !labEl || !creditsEl || !programSelectEl) {
                 return;
             }
-            const prevDefault = getDefaultSubjectPattern(typeEl.dataset.previousType || 'major');
-            const currentPatternMatchesPrevious = (
-                parseInt(meetingsEl.value || 0, 10) === prevDefault.meetingsPerWeek
-                && parseInt(lectureEl.value || 0, 10) === prevDefault.lectureMinutes
-                && parseInt(labEl.value || 0, 10) === prevDefault.labMinutes
-            );
-            if (currentPatternMatchesPrevious || !hoursEl.value) {
-                const nextDefault = getDefaultSubjectPattern(typeEl.value);
+            const programCode = getProgramCodeFromSelect(programSelectEl);
+            const nextDefault = getDefaultSubjectPattern(typeEl.value, creditsEl.value, programCode);
+            if (meetingsEl) {
                 meetingsEl.value = String(nextDefault.meetingsPerWeek);
-                lectureEl.value = String(nextDefault.lectureMinutes);
-                labEl.value = String(nextDefault.labMinutes);
             }
-            syncMajorTotal(meetingsEl, lectureEl, labEl, hoursEl);
+            lectureEl.value = formatClockMinutes(nextDefault.lectureMinutes);
+            labEl.value = formatClockMinutes(nextDefault.labMinutes);
+            syncMajorTotal(typeEl.id.startsWith('edit_') ? 'edit_' : '');
             typeEl.dataset.previousType = typeEl.value;
         }
 
@@ -1422,22 +1866,22 @@ if ($selectedSemester !== '') {
                     document.getElementById('edit_subject_code').value = data.subject_code;
                     document.getElementById('edit_subject_name').value = data.subject_name;
                     document.getElementById('edit_program_id').value = data.program_id ? String(data.program_id) : 'all';
-                    document.getElementById('edit_credits').value = data.credits;
+                    document.getElementById('edit_lecture_credits').value = data.lecture_credits || 0;
+                    document.getElementById('edit_lab_credits').value = data.lab_credits || 0;
                     document.getElementById('edit_semester').value = data.semester || '1st Semester';
                     document.getElementById('edit_year_level').value = String(data.year_level || 1);
                     document.getElementById('edit_prerequisites').value = data.prerequisites || '';
+                    document.getElementById('edit_preferred_day_pair').value = data.preferred_day_pair || '';
                     const editTypeEl = document.getElementById('edit_subject_type');
                     const editHoursEl = document.getElementById('edit_hours_per_week');
-                    const editMeetingsEl = document.getElementById('edit_meetings_per_week');
                     const editLectureEl = document.getElementById('edit_lecture_minutes_per_meeting');
                     const editLabEl = document.getElementById('edit_lab_minutes_per_meeting');
                     const editBreakdown = document.getElementById('edit_major_breakdown');
                     editTypeEl.value = (data.subject_type || 'major').toLowerCase();
                     editTypeEl.dataset.previousType = editTypeEl.value;
-                    editMeetingsEl.value = String(data.meetings_per_week || 2);
-                    editLectureEl.value = String(data.lecture_minutes_per_meeting || 0);
-                    editLabEl.value = String(data.lab_minutes_per_meeting || 0);
-                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
+                    editLectureEl.value = formatClockMinutes(data.lecture_minutes_per_meeting || 0);
+                    editLabEl.value = formatClockMinutes(data.lab_minutes_per_meeting || 0);
+                    syncMajorTotal('edit_');
                     updateMajorBreakdownVisibility(editTypeEl, editBreakdown, editHoursEl);
                     openModal('editSubjectModal');
                 });
@@ -1446,54 +1890,77 @@ if ($selectedSemester !== '') {
         const addSubjectType = document.getElementById('subject_type');
         if (addSubjectType) {
             const addHoursEl = document.getElementById('hours_per_week');
-            const addMeetingsEl = document.getElementById('meetings_per_week');
             const addLectureEl = document.getElementById('lecture_minutes_per_meeting');
             const addLabEl = document.getElementById('lab_minutes_per_meeting');
             const addBreakdown = document.getElementById('add_major_breakdown');
+            const addLecCreditsEl = document.getElementById('lecture_credits');
+            const addLabCreditsEl = document.getElementById('lab_credits');
+            const addProgramEl = document.getElementById('program_id');
             addSubjectType.dataset.previousType = addSubjectType.value;
             addSubjectType.addEventListener('change', function () {
-                syncHoursDefault(addSubjectType, addHoursEl, addMeetingsEl, addLectureEl, addLabEl);
+                const totalUnits = parseFloat(addLecCreditsEl.value || 0) + parseFloat(addLabCreditsEl.value || 0);
+                syncHoursDefault(addSubjectType, addHoursEl, null, addLectureEl, addLabEl, { value: totalUnits }, addProgramEl);
                 updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
             });
-            if (addMeetingsEl && addLectureEl && addLabEl) {
-                addMeetingsEl.addEventListener('input', function () {
-                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
-                });
-                addLectureEl.addEventListener('input', function () {
-                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
-                });
-                addLabEl.addEventListener('input', function () {
-                    syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
+            [addLecCreditsEl, addLabCreditsEl].forEach(el => {
+                if (el) {
+                    el.addEventListener('input', function () {
+                        // Keep manually entered lecture/lab time when units are edited.
+                        syncMajorTotal('');
+                    });
+                }
+            });
+
+            [addLectureEl, addLabEl].forEach(el => {
+                el?.addEventListener('input', () => syncMajorTotal(''));
+            });
+
+            if (addProgramEl) {
+                addProgramEl.addEventListener('change', function () {
+                    const totalUnits = parseFloat(addLecCreditsEl.value || 0) + parseFloat(addLabCreditsEl.value || 0);
+                    syncHoursDefault(addSubjectType, addHoursEl, null, addLectureEl, addLabEl, { value: totalUnits }, addProgramEl);
                 });
             }
             updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
-            syncMajorTotal(addMeetingsEl, addLectureEl, addLabEl, addHoursEl);
+            const initialTotal = parseFloat(addLecCreditsEl.value || 0) + parseFloat(addLabCreditsEl.value || 0);
+            syncHoursDefault(addSubjectType, addHoursEl, null, addLectureEl, addLabEl, { value: initialTotal }, addProgramEl);
         }
 
         const editSubjectType = document.getElementById('edit_subject_type');
         if (editSubjectType) {
             const editHoursEl = document.getElementById('edit_hours_per_week');
-            const editMeetingsEl = document.getElementById('edit_meetings_per_week');
             const editLectureEl = document.getElementById('edit_lecture_minutes_per_meeting');
             const editLabEl = document.getElementById('edit_lab_minutes_per_meeting');
             const editBreakdown = document.getElementById('edit_major_breakdown');
+            const editLecCreditsEl = document.getElementById('edit_lecture_credits');
+            const editLabCreditsEl = document.getElementById('edit_lab_credits');
+            const editProgramEl = document.getElementById('edit_program_id');
             editSubjectType.addEventListener('change', function () {
-                syncHoursDefault(editSubjectType, editHoursEl, editMeetingsEl, editLectureEl, editLabEl);
+                const totalUnits = parseFloat(editLecCreditsEl.value || 0) + parseFloat(editLabCreditsEl.value || 0);
+                syncHoursDefault(editSubjectType, editHoursEl, null, editLectureEl, editLabEl, { value: totalUnits }, editProgramEl);
                 updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
             });
-            if (editMeetingsEl && editLectureEl && editLabEl) {
-                editMeetingsEl.addEventListener('input', function () {
-                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
-                });
-                editLectureEl.addEventListener('input', function () {
-                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
-                });
-                editLabEl.addEventListener('input', function () {
-                    syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
+            [editLecCreditsEl, editLabCreditsEl].forEach(el => {
+                if (el) {
+                    el.addEventListener('input', function () {
+                        // Keep manually entered lecture/lab time when units are edited.
+                        syncMajorTotal('edit_');
+                    });
+                }
+            });
+
+            [editLectureEl, editLabEl].forEach(el => {
+                el?.addEventListener('input', () => syncMajorTotal('edit_'));
+            });
+
+            if (editProgramEl) {
+                editProgramEl.addEventListener('change', function () {
+                    const totalUnits = parseFloat(editLecCreditsEl.value || 0) + parseFloat(editLabCreditsEl.value || 0);
+                    syncHoursDefault(editSubjectType, editHoursEl, null, editLectureEl, editLabEl, { value: totalUnits }, editProgramEl);
                 });
             }
             updateMajorBreakdownVisibility(editSubjectType, editBreakdown, editHoursEl);
-            syncMajorTotal(editMeetingsEl, editLectureEl, editLabEl, editHoursEl);
+            syncMajorTotal('edit_');
         }
         
         // Close modals when clicking outside
@@ -1536,4 +2003,3 @@ if ($selectedSemester !== '') {
     </script>
 </body>
 </html>
-

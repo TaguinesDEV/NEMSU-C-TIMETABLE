@@ -11,6 +11,8 @@ $conflict_ids = [];
 $has_scheduled_minutes = false;
 try {
     $pdo->exec("ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours");
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN is_overload TINYINT(1) NOT NULL DEFAULT 0 AFTER is_published");
+    $pdo->exec("ALTER TABLE schedules ADD COLUMN is_praise TINYINT(1) NOT NULL DEFAULT 0 AFTER is_overload");
     $has_scheduled_minutes = true;
 } catch (Exception $e) {
     try {
@@ -216,6 +218,7 @@ $stmt = $pdo->prepare("
         i.id as instructor_id,
         u.full_name as instructor_name,
         i.max_hours_per_week,
+        i.status as instructor_status,
         i.department as instructor_dept,
         r.room_number,
         r.capacity,
@@ -238,12 +241,93 @@ $schedules = $stmt->fetchAll();
 
 // Group schedules by day for better display
 $grouped_schedules = [];
+$instructor_info = [];
+$praise_assignments = [];
+$overload_assignments = [];
+
 foreach ($schedules as $schedule) {
     $day = $schedule['day'];
     if (!isset($grouped_schedules[$day])) {
         $grouped_schedules[$day] = [];
     }
     $grouped_schedules[$day][] = $schedule;
+    
+    // Collect instructor info for load calculation
+    $instId = (int)($schedule['instructor_id'] ?? 0);
+    if ($instId > 0 && !isset($instructor_info[$instId])) {
+        $status = (string)($schedule['instructor_status'] ?? '');
+        $instructor_info[$instId] = [
+            'status' => $status,
+            'is_permanent' => ($status === 'Permanent'),
+            'max_load' => ($status === 'Permanent') ? 24 : 30,  // Permanent: 18+6 units; Others: 30 hours
+            'base_load' => ($status === 'Permanent') ? 18 : 30,  // For reference
+            'total_load' => 0.0,
+        ];
+    }
+}
+
+// Calculate total load per instructor
+foreach ($schedules as &$schedule) {
+    $instId = (int)($schedule['instructor_id'] ?? 0);
+    if ($instId > 0) {
+        // Institutional policy: Permanent = Units, Others = Hours.
+        $instData = $instructor_info[$instId];
+        $rowVal = $instData['is_permanent']
+            ? (float)($schedule['credits'] ?? 0)
+            : (float)($schedule['scheduled_hours'] ?? $schedule['hours_per_week'] ?? 0);
+        $instructor_info[$instId]['total_load'] += $rowVal;
+    }
+}
+unset($schedule);
+
+// Mark PRAISE (Permanent) or OVERLOAD (Contractual/Temporary) for excess assignments
+$cumulative_load = [];
+foreach ($schedules as &$schedule) {
+    $instId = (int)($schedule['instructor_id'] ?? 0);
+    if ($instId > 0) {
+        if (!isset($cumulative_load[$instId])) {
+            $cumulative_load[$instId] = 0;
+        }
+
+        $instData = $instructor_info[$instId];
+        $rowVal = $instData['is_permanent']
+            ? (float)($schedule['credits'] ?? 0)
+            : (float)($schedule['scheduled_hours'] ?? $schedule['hours_per_week'] ?? 0);
+        $cumulative_load[$instId] += $rowVal;
+        $maxAllowed = $instData['max_load'];
+        
+        if ($cumulative_load[$instId] > $maxAllowed) {
+            // Permanent = PRAISE, Contractual/Temporary = OVERLOAD
+            if ($instData['is_permanent']) {
+                $schedule['is_praise'] = 1;
+                $praise_assignments[] = [
+                    'instructor' => $schedule['instructor_name'],
+                    'subject' => $schedule['subject_code'],
+                    'load' => (float)$rowVal,
+                ];
+            } else {
+                $schedule['is_overload'] = 1;
+                $overload_assignments[] = [
+                    'instructor' => $schedule['instructor_name'],
+                    'subject' => $schedule['subject_code'],
+                    'hours' => (float)$rowVal,
+                ];
+            }
+        }
+    }
+}
+unset($schedule);
+
+// Update flags in database
+try {
+    foreach ($schedules as $schedule) {
+        $praiseFlag = (isset($schedule['is_praise']) && $schedule['is_praise']) ? 1 : 0;
+        $overloadFlag = (isset($schedule['is_overload']) && $schedule['is_overload']) ? 1 : 0;
+        $updateStmt = $pdo->prepare("UPDATE schedules SET is_praise = ?, is_overload = ? WHERE id = ?");
+        $updateStmt->execute([$praiseFlag, $overloadFlag, (int)$schedule['id']]);
+    }
+} catch (Exception $e) {
+    // Silently continue if update fails
 }
 
 // Define day order - dynamically based on available schedule days
@@ -395,6 +479,18 @@ unset($overloadRow);
 
         .conflict-row {
             background-color: #f8d7da !important;
+            font-weight: bold;
+            border: 1px solid #dc3545;
+        }
+
+        .praise-row {
+            background-color: #fff3cd !important;
+            font-weight: bold;
+            border: 1px solid #ff9800;
+        }
+
+        .overload-row {
+            background-color: #ffe0e0 !important;
             font-weight: bold;
             border: 1px solid #dc3545;
         }
@@ -837,6 +933,38 @@ unset($overloadRow);
             </div>
         <?php endif; ?>
 
+        <?php if (!empty($praise_assignments)): ?>
+            <div class="warning" style="background: #fff3cd; border: 2px solid #ff9800; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h3 style="color: #ff6600; margin-top: 0;">⚠️ Units Requiring Special Approval (PRAISE)</h3>
+                <p>The following assignments exceed the maximum permitted units for Permanent instructors and require special approval:</p>
+                <ul>
+                    <?php foreach ($praise_assignments as $assignment): ?>
+                        <li>
+                            <strong><?php echo htmlspecialchars($assignment['instructor']); ?></strong>:
+                            <?php echo htmlspecialchars($assignment['subject']); ?> 
+                            - <?php echo number_format($assignment['load'], 2); ?> units
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!empty($overload_assignments)): ?>
+            <div class="warning" style="background: #ffe0e0; border: 2px solid #dc3545; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h3 style="color: #d32f2f; margin-top: 0;">⚠️ Hours Exceeding Limit (OVERLOAD)</h3>
+                <p>The following assignments exceed the 30-hour maximum for Contractual/Temporary instructors and are marked as OVERLOAD:</p>
+                <ul>
+                    <?php foreach ($overload_assignments as $assignment): ?>
+                        <li>
+                            <strong><?php echo htmlspecialchars($assignment['instructor']); ?></strong>:
+                            <?php echo htmlspecialchars($assignment['subject']); ?> 
+                            - <?php echo number_format($assignment['hours'], 2); ?> hours
+                        </li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
+
         <!-- Schedule Display -->
         <?php if ($job['status'] == 'completed'): ?>
             <div class="schedule-view">
@@ -901,12 +1029,33 @@ unset($overloadRow);
                                     <?php 
                                     // Sort by time
                                     usort($grouped_schedules[$day], function($a, $b) {
-                                        return strtotime($a['start_time']) - strtotime($b['start_time']);
+                                        $timeCompare = strtotime((string)($a['start_time'] ?? '')) <=> strtotime((string)($b['start_time'] ?? ''));
+                                        if ($timeCompare !== 0) {
+                                            return $timeCompare;
+                                        }
+
+                                        $rank = static function ($row): int {
+                                            $meetingKind = strtolower(trim((string)($row['meeting_kind'] ?? '')));
+                                            if ($meetingKind === 'lecture') {
+                                                return 0;
+                                            }
+                                            if ($meetingKind === 'lab') {
+                                                return 1;
+                                            }
+                                            return 2;
+                                        };
+
+                                        $meetingCompare = $rank($a) <=> $rank($b);
+                                        if ($meetingCompare !== 0) {
+                                            return $meetingCompare;
+                                        }
+
+                                        return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
                                     });
                                     
                                     foreach ($grouped_schedules[$day] as $schedule): 
                                     ?>
-                                    <tr class="schedule-search-row <?php echo $schedule['is_published'] ? 'published-row' : ''; ?> <?php echo isset($conflict_ids[$schedule['id']]) ? 'conflict-row' : ''; ?>"
+                                    <tr class="schedule-search-row <?php echo $schedule['is_published'] ? 'published-row' : ''; ?> <?php echo isset($conflict_ids[$schedule['id']]) ? 'conflict-row' : ''; ?> <?php echo isset($schedule['is_praise']) && $schedule['is_praise'] ? 'praise-row' : ''; ?> <?php echo isset($schedule['is_overload']) && $schedule['is_overload'] ? 'overload-row' : ''; ?>"
                                         data-search="<?php echo htmlspecialchars(strtolower(implode(' ', [
                                             (string)$day,
                                             (string)($schedule['subject_code'] ?? ''),
@@ -927,10 +1076,18 @@ unset($overloadRow);
                                             <?php echo date('g:i A', strtotime($displayEndTime)); ?>
                                         </td>
                                         <td>
-                                            <strong><?php echo $schedule['subject_code']; ?></strong><br>
+                                            <?php echo $schedule['subject_code']; ?><br>
                                             <small><?php echo $schedule['subject_name']; ?></small>
                                         </td>
-                                        <td><?php echo $schedule['instructor_name']; ?></td>
+                                        <td>
+                                            <?php echo $schedule['instructor_name']; ?>
+                                            <?php if (isset($schedule['is_praise']) && $schedule['is_praise']): ?>
+                                                <span style="background: #ff9800; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 5px; font-weight: bold;">PRAISE</span>
+                                            <?php endif; ?>
+                                            <?php if (isset($schedule['is_overload']) && $schedule['is_overload']): ?>
+                                                <span style="background: #dc3545; color: white; padding: 2px 8px; border-radius: 3px; font-size: 0.8em; margin-left: 5px; font-weight: bold;">OVERLOAD</span>
+                                            <?php endif; ?>
+                                        </td>
                                         <td>
                                             <?php echo $schedule['room_number']; ?><br>
                                             <small><?php echo $schedule['building']; ?> (Cap: <?php echo $schedule['capacity']; ?>)</small>

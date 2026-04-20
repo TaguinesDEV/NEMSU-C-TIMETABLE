@@ -174,6 +174,8 @@ CREATE TABLE `schedules` (
     `year_level` INT,
     `section` VARCHAR(10),
     `is_published` BOOLEAN DEFAULT FALSE,
+    `is_overload` TINYINT(1) NOT NULL DEFAULT 0,
+    `is_praise` TINYINT(1) NOT NULL DEFAULT 0,
     `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`job_id`) REFERENCES `schedule_jobs`(`id`) ON DELETE CASCADE,
     FOREIGN KEY (`subject_id`) REFERENCES `subjects`(`id`),

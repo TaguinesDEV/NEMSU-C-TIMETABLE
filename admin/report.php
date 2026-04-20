@@ -26,6 +26,25 @@ try {
     // Keep report working even if table creation is restricted.
 }
 
+// Optional consultation slots for vacant workload times.
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS instructor_consultation_slots (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            instructor_id INT NOT NULL,
+            day_group VARCHAR(32) NOT NULL,
+            time_label VARCHAR(32) NOT NULL,
+            note VARCHAR(120) NOT NULL DEFAULT 'Consultation',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_instructor_consultation_slot (instructor_id, day_group, time_label),
+            INDEX idx_instructor_consultation (instructor_id),
+            FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE
+        )
+    ");
+} catch (Exception $e) {
+    // Keep report working even if table creation is restricted.
+}
+
 $signatory_defaults = [
     'header_country' => 'Republic of the Philippines',
     'header_university' => 'North Eastern Mindanao State University',
@@ -44,6 +63,14 @@ $signatory_defaults = [
     'approved_by_label' => 'Approved:',
     'approved_by_name' => 'JUANCHO A. INTANO, Ph.D.',
     'approved_by_title' => 'Campus Director',
+    'instructor_prepared_by_name' => 'NELYNE LOURDES Y. PLAZA, Ph.D., PCpE',
+    'instructor_prepared_by_title' => 'Chair, Dept. Computer Studies',
+    'instructor_recommending_1_name' => 'JUANCHO A. INTANO, Ph.D.',
+    'instructor_recommending_1_title' => 'Campus Director',
+    'instructor_recommending_2_name' => 'ENGR. ALEX S. LADAGA, Ph.D.',
+    'instructor_recommending_2_title' => 'Dean, CITE',
+    'instructor_approved_by_name' => 'MARIA LADY SOL A. SUAZO, Ph.D.',
+    'instructor_approved_by_title' => 'VP - Academic Affairs',
     'document_code' => 'FM-ACAD-024/Rev002/01.26.2026/Page1',
     'contact_address' => 'Cantilan, Surigao del Sur 8317',
     'contact_phone' => '086-212-2723',
@@ -104,6 +131,51 @@ $renderReportFooter = static function (array $signatories): void {
                         <img src="<?php echo htmlspecialchars($logo_src); ?>" alt="Footer logo">
                     <?php endif; ?>
                 <?php endforeach; ?>
+            </div>
+        </div>
+    </div>
+    <?php
+};
+
+$renderInstructorFooter = static function (array $selectedInstructor, array $footer): void {
+    $conformedName = trim((string)($selectedInstructor['full_name'] ?? ''));
+    if ($conformedName === '') {
+        $conformedName = (string)($footer['instructor_prepared_by_name'] ?? '');
+    }
+    $conformedTitle = trim((string)($selectedInstructor['status'] ?? 'Instructor'));
+    if ($conformedTitle === '') {
+        $conformedTitle = 'Instructor';
+    }
+    ?>
+        <div class="faculty-signatures instructor-signatures">
+        <div class="faculty-signature-row">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label">Prepared by:</div>
+                <div class="faculty-signature-name"><?php echo htmlspecialchars($footer['instructor_prepared_by_name'] ?? ''); ?></div>
+                <div class="faculty-signature-title"><?php echo htmlspecialchars($footer['instructor_prepared_by_title'] ?? ''); ?></div>
+            </div>
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label">Conformed:</div>
+                <div class="faculty-signature-name"><?php echo htmlspecialchars($conformedName); ?></div>
+                <div class="faculty-signature-title"><?php echo htmlspecialchars($conformedTitle); ?></div>
+            </div>
+        </div>
+        <div class="faculty-signature-row-label">Recommending Approval:</div>
+        <div class="faculty-signature-row">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-name"><?php echo htmlspecialchars($footer['instructor_recommending_1_name'] ?? ''); ?></div>
+                <div class="faculty-signature-title"><?php echo htmlspecialchars($footer['instructor_recommending_1_title'] ?? ''); ?></div>
+            </div>
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-name"><?php echo htmlspecialchars($footer['instructor_recommending_2_name'] ?? ''); ?></div>
+                <div class="faculty-signature-title"><?php echo htmlspecialchars($footer['instructor_recommending_2_title'] ?? ''); ?></div>
+            </div>
+        </div>
+        <div class="faculty-signature-row single">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label faculty-signature-label-centered">Approved:</div>
+                <div class="faculty-signature-name"><?php echo htmlspecialchars($footer['instructor_approved_by_name'] ?? ''); ?></div>
+                <div class="faculty-signature-title"><?php echo htmlspecialchars($footer['instructor_approved_by_title'] ?? ''); ?></div>
             </div>
         </div>
     </div>
@@ -239,6 +311,47 @@ foreach ($departments as $deptRow) {
     $departmentIdByLookup[strtoupper($deptRow['dept_name'] . ' (' . $deptRow['dept_code'] . ')')] = (int)$deptRow['id'];
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_consultation_slot'])) {
+    $targetInstructorId = (int)($_POST['consultation_instructor_id'] ?? 0);
+    $targetDayGroup = trim((string)($_POST['consultation_day_group'] ?? ''));
+    $targetTimeLabel = trim((string)($_POST['consultation_time_label'] ?? ''));
+    $targetNote = trim((string)($_POST['consultation_note'] ?? 'Consultation'));
+    if ($targetNote === '') {
+        $targetNote = 'Consultation';
+    }
+
+    if ($targetInstructorId <= 0 || $targetDayGroup === '' || $targetTimeLabel === '') {
+        $error = 'Unable to save consultation slot: missing required fields.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("
+                INSERT INTO instructor_consultation_slots (instructor_id, day_group, time_label, note)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE note = VALUES(note)
+            ");
+            $stmt->execute([$targetInstructorId, $targetDayGroup, $targetTimeLabel, $targetNote]);
+            $message = 'Consultation slot saved.';
+        } catch (Exception $e) {
+            $error = 'Unable to save consultation slot: ' . $e->getMessage();
+        }
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_consultation_slot'])) {
+    $consultationSlotId = (int)($_POST['consultation_slot_id'] ?? 0);
+    if ($consultationSlotId <= 0) {
+        $error = 'Unable to delete consultation slot: invalid id.';
+    } else {
+        try {
+            $stmt = $pdo->prepare("DELETE FROM instructor_consultation_slots WHERE id = ?");
+            $stmt->execute([$consultationSlotId]);
+            $message = 'Consultation slot removed.';
+        } catch (Exception $e) {
+            $error = 'Unable to delete consultation slot: ' . $e->getMessage();
+        }
+    }
+}
+
 $programIdByLookup = [];
 foreach ($programs as $programRow) {
     $programIdByLookup[strtoupper($programRow['program_name'])] = (int)$programRow['id'];
@@ -255,13 +368,45 @@ $department_id = (int)($departmentIdByLookup[strtoupper($department_lookup)] ?? 
 $program_id = (int)($programIdByLookup[strtoupper($program_lookup)] ?? 0);
 $instructor_id = (int)($instructorIdByLookup[strtoupper($instructor_lookup)] ?? 0);
 
+$scheduleColumns = [];
+try {
+    $scheduleColumnRows = $pdo->query("SHOW COLUMNS FROM schedules")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($scheduleColumnRows as $scheduleColumnRow) {
+        $columnName = (string)($scheduleColumnRow['Field'] ?? '');
+        if ($columnName !== '') {
+            $scheduleColumns[$columnName] = true;
+        }
+    }
+} catch (Exception $e) {
+    $scheduleColumns = [];
+}
+
+$hasScheduledHoursColumn = isset($scheduleColumns['scheduled_hours']);
+$hasScheduledMinutesColumn = isset($scheduleColumns['scheduled_minutes']);
+
+// Prefer the actual saved meeting duration from schedules when available.
+$scheduledHoursExpression = $hasScheduledHoursColumn
+    ? 'COALESCE(s.scheduled_hours, sub.hours_per_week)'
+    : 'sub.hours_per_week';
+$scheduledMinutesExpression = $hasScheduledMinutesColumn
+    ? 'COALESCE(s.scheduled_minutes, 0)'
+    : '0';
+$reportEndTimeExpression = $hasScheduledMinutesColumn
+    ? "CASE
+            WHEN COALESCE(s.scheduled_minutes, 0) > 0 THEN ADDTIME(ts.start_time, SEC_TO_TIME(s.scheduled_minutes * 60))
+            ELSE ts.end_time
+       END"
+    : 'ts.end_time';
+
 // Build query (include subject credits/hours for report format)
 $query = "
-    SELECT s.*, sub.subject_code, sub.subject_name, sub.credits, sub.hours_per_week,
-           sub.lecture_hours, sub.lab_hours,
-           COALESCE(s.scheduled_hours, sub.hours_per_week) AS scheduled_hours,
-           i.id as instructor_id, u.full_name as instructor_name,
+    SELECT s.*, sub.subject_code, sub.subject_name, sub.credits, sub.lecture_credits, sub.lab_credits, sub.hours_per_week,
+           sub.lecture_hours, sub.lab_hours, sub.subject_type,
+           {$scheduledHoursExpression} AS scheduled_hours,
+           {$scheduledMinutesExpression} AS report_scheduled_minutes,
+           i.id as instructor_id, u.full_name as instructor_name, i.status as instructor_status,
            r.room_number, r.capacity AS room_capacity, r.has_computers, ts.day, ts.start_time, ts.end_time,
+           {$reportEndTimeExpression} AS report_end_time,
            p.id AS program_id, p.program_name, p.program_code,
            d.id AS resolved_department_id, d.dept_name, d.dept_code,
            j.job_name, j.input_data
@@ -399,49 +544,63 @@ $format_course_code = static function (array $row, array &$job_input_cache) use 
 $format_workload_time = static function ($startTime, $endTime): string {
     return date('g:i', strtotime((string) $startTime)) . '-' . date('g:i', strtotime((string) $endTime));
 };
+$format_slot_label_with_day = static function (string $baseLabel, array $row, int $slotRowCount, bool $forceDayLabel = false): string {
+    $label = trim((string)$baseLabel);
+    if ($label === '') {
+        return $label;
+    }
+    if ($slotRowCount <= 1) {
+        if (!$forceDayLabel) {
+            return $label;
+        }
+    }
+    $day = trim((string)($row['day'] ?? ''));
+    if ($day === '') {
+        return $label;
+    }
+    return $label . ' (' . $day . ')';
+};
 
-$format_subject_description = static function (array $row): string {
-    $subjectName = trim((string) ($row['subject_name'] ?? ''));
+$resolve_row_meeting_kind = static function (array $row): string {
     $meetingKind = strtolower(trim((string) ($row['meeting_kind'] ?? '')));
+    if ($meetingKind === 'lecture' || $meetingKind === 'lab') {
+        return $meetingKind;
+    }
+
+    $lectureHours = (float) ($row['lecture_hours'] ?? 0);
+    $labHours = (float) ($row['lab_hours'] ?? 0);
+    if ($labHours > 0 && $lectureHours <= 0) {
+        return 'lab';
+    }
+    if ($lectureHours > 0 && $labHours <= 0) {
+        return 'lecture';
+    }
+    if ($lectureHours > 0 && $labHours > 0) {
+        return ((int) ($row['has_computers'] ?? 0) === 1) ? 'lab' : 'lecture';
+    }
+
+    return '';
+};
+
+$format_subject_description = static function (array $row) use ($resolve_row_meeting_kind): string {
+    $subjectName = trim((string) ($row['subject_name'] ?? ''));
+    $meetingKind = $resolve_row_meeting_kind($row);
     if ($meetingKind === 'lecture') {
         return $subjectName . ' (Lec)';
     }
     if ($meetingKind === 'lab') {
         return $subjectName . ' (Lab)';
     }
-
-    $lectureHours = (float) ($row['lecture_hours'] ?? 0);
-    $labHours = (float) ($row['lab_hours'] ?? 0);
-    if ($labHours > 0 && $lectureHours <= 0) {
-        return $subjectName . ' (Lab)';
-    }
-    if ($lectureHours > 0 && $labHours <= 0) {
-        return $subjectName . ' (Lec)';
-    }
-    if ($lectureHours > 0 && $labHours > 0) {
-        return $subjectName . ((int) ($row['has_computers'] ?? 0) === 1 ? ' (Lab)' : ' (Lec)');
-    }
     return $subjectName;
 };
 
-$build_section_row_signature = static function (array $row): string {
+$build_section_row_signature = static function (array $row) use ($resolve_row_meeting_kind): string {
     $subjectKey = strtoupper(trim((string) ($row['subject_code'] ?? '')));
     if ($subjectKey === '') {
         $subjectKey = (string) ((int) ($row['subject_id'] ?? 0));
     }
 
-    $meetingKind = strtolower(trim((string) ($row['meeting_kind'] ?? '')));
-    if ($meetingKind === '') {
-        $lectureHours = (float) ($row['lecture_hours'] ?? 0);
-        $labHours = (float) ($row['lab_hours'] ?? 0);
-        if ($lectureHours > 0 && $labHours <= 0) {
-            $meetingKind = 'lecture';
-        } elseif ($labHours > 0 && $lectureHours <= 0) {
-            $meetingKind = 'lab';
-        } elseif ($lectureHours > 0 && $labHours > 0) {
-            $meetingKind = ((int) ($row['has_computers'] ?? 0) === 1) ? 'lab' : 'lecture';
-        }
-    }
+    $meetingKind = $resolve_row_meeting_kind($row);
 
     return implode('|', [
         (string) $subjectKey,
@@ -463,21 +622,52 @@ $workload_group_titles = [
     'Wed/Afternoon' => 'WED/Afternoon',
     'TF/Morning' => 'TF/Morning',
     'TF/Afternoon' => 'TF/Afternoon',
+    'Monday/Morning' => 'MONDAY/Morning',
+    'Monday/Afternoon' => 'MONDAY/Afternoon',
+    'Tuesday/Morning' => 'TUESDAY/Morning',
+    'Tuesday/Afternoon' => 'TUESDAY/Afternoon',
+    'Wednesday/Morning' => 'WEDNESDAY/Morning',
+    'Wednesday/Afternoon' => 'WEDNESDAY/Afternoon',
+    'Thursday/Morning' => 'THURSDAY/Morning',
+    'Thursday/Afternoon' => 'THURSDAY/Afternoon',
+    'Friday/Morning' => 'FRIDAY/Morning',
+    'Friday/Afternoon' => 'FRIDAY/Afternoon',
     'Saturday' => 'SATURDAY',
 ];
 
 $section_group_titles = [
-    'MTh/A.M.' => 'MTh/A.M.',
-    'MTh/P.M.' => 'MTh/P.M.',
-    'TF/A.M.' => 'TF/A.M.',
-    'TF/P.M.' => 'TF/P.M.',
+    'MTh/A.M.' => 'MTh/Morning',
+    'MTh/P.M.' => 'MTh/Afternoon',
+    'TF/A.M.' => 'TF/Morning',
+    'TF/P.M.' => 'TF/Afternoon',
     'Wed/A.M.' => 'Wed/Morning',
     'Wed/P.M.' => 'Wed/Afternoon',
+    'Monday/A.M.' => 'Monday/Morning',
+    'Monday/P.M.' => 'Monday/Afternoon',
+    'Tuesday/A.M.' => 'Tuesday/Morning',
+    'Tuesday/P.M.' => 'Tuesday/Afternoon',
+    'Wednesday/A.M.' => 'Wednesday/Morning',
+    'Wednesday/P.M.' => 'Wednesday/Afternoon',
+    'Thursday/A.M.' => 'Thursday/Morning',
+    'Thursday/P.M.' => 'Thursday/Afternoon',
+    'Friday/A.M.' => 'Friday/Morning',
+    'Friday/P.M.' => 'Friday/Afternoon',
     'Saturday' => 'SATURDAY',
 ];
 
 $format_schedule_time_label = static function ($startTime, $endTime): string {
     return date('g:i', strtotime((string) $startTime)) . '-' . date('g:i', strtotime((string) $endTime));
+};
+$break_time_label = '11:30-1:00';
+$meeting_kind_rank = static function (array $row) use ($resolve_row_meeting_kind): int {
+    $meetingKind = $resolve_row_meeting_kind($row);
+    if ($meetingKind === 'lecture') {
+        return 0;
+    }
+    if ($meetingKind === 'lab') {
+        return 1;
+    }
+    return 2;
 };
 
 $sanitize_export_filename = static function (string $value): string {
@@ -487,8 +677,102 @@ $sanitize_export_filename = static function (string $value): string {
 };
 
 $job_input_cache = [];
+$resolve_section_grouping_mode = static function (array $row, array &$job_input_cache): string {
+    $jobId = (int)($row['job_id'] ?? 0);
+    if (!array_key_exists($jobId, $job_input_cache)) {
+        $raw = (string)($row['input_data'] ?? '');
+        $decoded = json_decode($raw, true);
+        $job_input_cache[$jobId] = is_array($decoded) ? $decoded : [];
+    }
+
+    $jobInput = $job_input_cache[$jobId] ?? [];
+    $constraints = is_array($jobInput['constraints'] ?? null) ? $jobInput['constraints'] : [];
+    if (($constraints['day_grouping_mode'] ?? '') === 'individual') {
+        return 'individual';
+    }
+    if (!empty($constraints['individual_weekdays'])) {
+        return 'individual';
+    }
+
+    return 'paired';
+};
+$get_paired_group_multiplier = static function (string $groupKey, string $groupMode): float {
+    if ($groupMode !== 'paired') {
+        return 1.0;
+    }
+    return preg_match('/^(MTh|TF)\//i', trim($groupKey)) ? 2.0 : 1.0;
+};
+$get_effective_slot_multiplier = static function (float $baseMultiplier, int $slotRowCount): float {
+    // If a paired bucket already has multiple explicit rows (typically different days/subjects),
+    // avoid doubling each row; treat each as an explicit single schedule entry.
+    if ($baseMultiplier > 1.0 && $slotRowCount > 1) {
+        return 1.0;
+    }
+    return $baseMultiplier;
+};
+$build_subject_unit_key = static function (array $row) use ($resolve_row_meeting_kind): string {
+    $subjectKey = (int)($row['subject_id'] ?? 0);
+    if ($subjectKey > 0) {
+        $subjectKey = (string)$subjectKey;
+    } else {
+        $subjectKey = strtoupper(trim((string)($row['subject_code'] ?? '')));
+    }
+    if ($subjectKey === '') {
+        return '';
+    }
+
+    $meetingKind = $resolve_row_meeting_kind($row);
+    if ($meetingKind === '') {
+        $meetingKind = 'general';
+    }
+
+    return strtoupper(trim((string)$subjectKey)) . '|' . $meetingKind;
+};
+$get_row_units = static function (array $row) use ($resolve_row_meeting_kind): float {
+    $meetingKind = $resolve_row_meeting_kind($row);
+    $lectureCredits = (float)($row['lecture_credits'] ?? 0);
+    $labCredits = (float)($row['lab_credits'] ?? 0);
+    $lectureHours = (float)($row['lecture_hours'] ?? 0);
+    $labHours = (float)($row['lab_hours'] ?? 0);
+
+    if ($meetingKind === 'lecture') {
+        if ($lectureCredits > 0) {
+            return $lectureCredits;
+        }
+        if ($lectureHours > 0) {
+            return $lectureHours;
+        }
+    } elseif ($meetingKind === 'lab') {
+        if ($labCredits > 0) {
+            return $labCredits;
+        }
+        if ($labHours > 0) {
+            return $labHours;
+        }
+    }
+
+    if ($lectureCredits > 0 && $labCredits <= 0) {
+        return $lectureCredits;
+    }
+    if ($labCredits > 0 && $lectureCredits <= 0) {
+        return $labCredits;
+    }
+
+    $credits = (float)($row['credits'] ?? 0);
+    $hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0);
+
+    if ($credits <= 0 && $hours > 0) {
+        return $hours;
+    }
+    if ($hours > $credits) {
+        return $hours;
+    }
+    return $credits;
+};
 $by_section = [];
 foreach ($schedules as $row) {
+    $row['report_end_time'] = (string)($row['report_end_time'] ?? $row['end_time'] ?? '');
+    $row['report_time_label'] = $format_schedule_time_label($row['start_time'] ?? '', $row['report_end_time']);
     $sec = (string)($row['section'] ?? '');
     $programKey = strtoupper(trim((string)($row['program_code'] ?? '')));
     if ($programKey === '') {
@@ -510,29 +794,53 @@ foreach ($by_section as $key => &$section) {
     $section_seen_rows = [];
     $section_total_units = 0.0;
     $counted_subject_units = [];
-    foreach ($section['rows'] as $row) {
-        $dg = $day_to_group[$row['day']] ?? $row['day'];
-        if ($dg === 'Saturday') {
-            $group_key = 'Saturday';
+    $section_group_mode = 'paired';
+    $section_slot_counts = [];
+    foreach ($section['rows'] as $slotProbeRow) {
+        $probe_mode = $resolve_section_grouping_mode($slotProbeRow, $job_input_cache);
+        if (($slotProbeRow['day'] ?? '') === 'Saturday') {
+            $probe_group_key = 'Saturday';
+        } elseif ($probe_mode === 'individual') {
+            $probe_period = (strtotime($slotProbeRow['start_time']) < strtotime('12:00:00')) ? 'A.M.' : 'P.M.';
+            $probe_group_key = $slotProbeRow['day'] . '/' . $probe_period;
         } else {
+            $probe_dg = $day_to_group[$slotProbeRow['day']] ?? $slotProbeRow['day'];
+            $probe_period = (strtotime($slotProbeRow['start_time']) < strtotime('12:00:00')) ? 'A.M.' : 'P.M.';
+            $probe_group_key = $probe_dg . '/' . $probe_period;
+        }
+        $probe_time_label = (string)($slotProbeRow['report_time_label'] ?? '');
+        if (!isset($section_slot_counts[$probe_group_key])) {
+            $section_slot_counts[$probe_group_key] = [];
+        }
+        $section_slot_counts[$probe_group_key][$probe_time_label] = (int)($section_slot_counts[$probe_group_key][$probe_time_label] ?? 0) + 1;
+    }
+    foreach ($section['rows'] as $row) {
+        $section_group_mode = $resolve_section_grouping_mode($row, $job_input_cache);
+        if (($row['day'] ?? '') === 'Saturday') {
+            $group_key = 'Saturday';
+        } elseif ($section_group_mode === 'individual') {
+            $period = (strtotime($row['start_time']) < strtotime('12:00:00')) ? 'A.M.' : 'P.M.';
+            $group_key = $row['day'] . '/' . $period;
+        } else {
+            $dg = $day_to_group[$row['day']] ?? $row['day'];
             $period = (strtotime($row['start_time']) < strtotime('12:00:00')) ? 'A.M.' : 'P.M.';
             $group_key = $dg . '/' . $period;
         }
         if (!isset($by_day[$group_key])) {
             $by_day[$group_key] = [];
         }
-        $row['report_time_label'] = $format_workload_time($row['start_time'], $row['end_time']);
         $row_signature = $group_key . '|' . $build_section_row_signature($row);
         if (!isset($section_seen_rows[$row_signature])) {
             $by_day[$group_key][] = $row;
             $section_seen_rows[$row_signature] = true;
         }
-        $subject_unit_key = (int) ($row['subject_id'] ?? 0);
-        if ($subject_unit_key <= 0) {
-            $subject_unit_key = trim((string) ($row['subject_code'] ?? ''));
-        }
+        $subject_unit_key = $build_subject_unit_key($row);
         if ($subject_unit_key !== '' && !isset($counted_subject_units[$subject_unit_key])) {
-            $section_total_units += (float) ($row['credits'] ?? 0);
+            $basePairMultiplier = $get_paired_group_multiplier((string)$group_key, (string)$section_group_mode);
+            $rowTimeLabel = (string)($row['report_time_label'] ?? '');
+            $slotRowCount = (int)($section_slot_counts[$group_key][$rowTimeLabel] ?? 1);
+            $effectivePairMultiplier = $get_effective_slot_multiplier((float)$basePairMultiplier, $slotRowCount);
+            $section_total_units += $get_row_units($row) * $effectivePairMultiplier;
             $counted_subject_units[$subject_unit_key] = true;
         }
     }
@@ -544,6 +852,7 @@ foreach ($by_section as $key => &$section) {
         });
     }
     $section['by_day_group'] = $by_day;
+    $section['day_group_mode'] = $section_group_mode;
     $section['total_units'] = round($section_total_units, 2);
 }
 unset($section);
@@ -569,8 +878,16 @@ uksort($by_section, function ($a, $b) {
 });
 
 // Instructor-specific workload view data
+$paired_workload_order = ['MTh/Morning', 'MTh/Afternoon', 'Wed/Morning', 'Wed/Afternoon', 'TF/Morning', 'TF/Afternoon', 'Saturday'];
+$individual_workload_order = ['Monday/Morning', 'Monday/Afternoon', 'Tuesday/Morning', 'Tuesday/Afternoon', 'Wednesday/Morning', 'Wednesday/Afternoon', 'Thursday/Morning', 'Thursday/Afternoon', 'Friday/Morning', 'Friday/Afternoon', 'Saturday'];
+$workload_order = $paired_workload_order;
+$instructor_workload_mode = 'paired';
 $selected_instructor = null;
 $instructor_workload = [];
+$workload_time_template = [
+    'Morning' => [],
+    'Afternoon' => [],
+];
 $total_units = 0;
 $total_hours = 0;
 $total_preparations = 0;
@@ -579,9 +896,75 @@ $is_overloaded = false;
 $overload_approved = false;
 $overload_approval = null;
 $overload_subjects = [];
+$overload_subject_rows = [];
+$praise_subjects = [];
+$praise_subject_rows = [];
+$is_praise = false;
+$actual_total_units = 0.0;
+$actual_total_hours = 0.0;
+$actual_total_units_with_deloading = 0.0;
+$actual_total_preparations = 0;
+$consultation_slot_map = [];
+$consultation_slot_list = [];
+
+try {
+    $timeSlotRows = $pdo->query("
+        SELECT DISTINCT start_time, end_time
+        FROM time_slots
+        WHERE COALESCE(slot_type, 'regular') = 'regular'
+        ORDER BY start_time, end_time
+    ")->fetchAll(PDO::FETCH_ASSOC);
+
+    foreach ($timeSlotRows as $slotRow) {
+        $startTime = (string)($slotRow['start_time'] ?? '');
+        $endTime = (string)($slotRow['end_time'] ?? '');
+        if ($startTime === '' || $endTime === '') {
+            continue;
+        }
+        $slotLabel = $format_workload_time($startTime, $endTime);
+        $period = (strtotime($startTime) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
+        if (!in_array($slotLabel, $workload_time_template[$period], true)) {
+            $workload_time_template[$period][] = $slotLabel;
+        }
+    }
+} catch (Exception $e) {
+    // Fallback template for workload table when time slot lookup fails.
+}
+
+if (empty($workload_time_template['Morning'])) {
+    $workload_time_template['Morning'] = ['7:00-8:30', '8:30-10:00', '10:00-11:30'];
+}
+if (empty($workload_time_template['Afternoon'])) {
+    $workload_time_template['Afternoon'] = ['1:00-2:30', '2:30-4:00', '4:00-5:30'];
+}
+if (!in_array($break_time_label, $workload_time_template['Morning'], true)) {
+    $workload_time_template['Morning'][] = $break_time_label;
+}
+$section_time_slots_by_group = [
+    'MTh/A.M.' => $workload_time_template['Morning'],
+    'MTh/P.M.' => $workload_time_template['Afternoon'],
+    'TF/A.M.' => $workload_time_template['Morning'],
+    'TF/P.M.' => $workload_time_template['Afternoon'],
+    'Wed/A.M.' => $workload_time_template['Morning'],
+    'Wed/P.M.' => $workload_time_template['Afternoon'],
+    'Monday/A.M.' => $workload_time_template['Morning'],
+    'Monday/P.M.' => $workload_time_template['Afternoon'],
+    'Tuesday/A.M.' => $workload_time_template['Morning'],
+    'Tuesday/P.M.' => $workload_time_template['Afternoon'],
+    'Wednesday/A.M.' => $workload_time_template['Morning'],
+    'Wednesday/P.M.' => $workload_time_template['Afternoon'],
+    'Thursday/A.M.' => $workload_time_template['Morning'],
+    'Thursday/P.M.' => $workload_time_template['Afternoon'],
+    'Friday/A.M.' => $workload_time_template['Morning'],
+    'Friday/P.M.' => $workload_time_template['Afternoon'],
+    'Saturday' => array_values(array_unique(array_merge($workload_time_template['Morning'], $workload_time_template['Afternoon']))),
+];
+$consultation_time_options_by_group = [];
+
 if (!empty($instructor_id)) {
     $stmt = $pdo->prepare("
-        SELECT i.id, u.full_name, i.department, i.status,
+        SELECT i.id, u.full_name, i.department, i.specialization, i.status,
+               i.education, i.eligibility, i.service_years,
                i.designation, i.designation_units,
                i.research_extension, i.research_extension_units,
                i.special_assignment, i.special_assignment_units
@@ -591,32 +974,90 @@ if (!empty($instructor_id)) {
     ");
     $stmt->execute([$instructor_id]);
     $selected_instructor = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($selected_instructor) {
+        $selected_instructor['major_display'] = trim((string)($selected_instructor['specialization'] ?? ''));
+    }
+    try {
+        $stmt = $pdo->prepare("
+            SELECT id, day_group, time_label, note
+            FROM instructor_consultation_slots
+            WHERE instructor_id = ?
+            ORDER BY day_group, time_label
+        ");
+        $stmt->execute([$instructor_id]);
+        $consultation_slot_list = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($consultation_slot_list as $slotRow) {
+            $groupKey = (string)($slotRow['day_group'] ?? '');
+            $timeKey = (string)($slotRow['time_label'] ?? '');
+            if ($groupKey !== '' && $timeKey !== '') {
+                if (!isset($consultation_slot_map[$groupKey])) {
+                    $consultation_slot_map[$groupKey] = [];
+                }
+                $consultation_slot_map[$groupKey][$timeKey] = $slotRow;
+            }
+        }
+    } catch (Exception $e) {
+        $consultation_slot_map = [];
+        $consultation_slot_list = [];
+    }
 
     $counted_instructor_subject_units = [];
     foreach ($schedules as $row) {
-        $dg = $day_to_group[$row['day']] ?? $row['day'];
-        if ($dg === 'Saturday') {
-            $group_key = 'Saturday';
+        if ($resolve_section_grouping_mode($row, $job_input_cache) === 'individual') {
+            $instructor_workload_mode = 'individual';
+            break;
+        }
+    }
+    $workload_order = ($instructor_workload_mode === 'individual') ? $individual_workload_order : $paired_workload_order;
+    $instructor_slot_counts = [];
+    foreach ($schedules as $slotProbeRow) {
+        if (($slotProbeRow['day'] ?? '') === 'Saturday') {
+            $probe_group_key = 'Saturday';
+        } elseif ($instructor_workload_mode === 'individual') {
+            $probe_period = (strtotime($slotProbeRow['start_time']) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
+            $probe_group_key = $slotProbeRow['day'] . '/' . $probe_period;
         } else {
+            $probe_dg = $day_to_group[$slotProbeRow['day']] ?? $slotProbeRow['day'];
+            $probe_period = (strtotime($slotProbeRow['start_time']) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
+            $probe_group_key = $probe_dg . '/' . $probe_period;
+        }
+        $probe_end = (string)($slotProbeRow['report_end_time'] ?? $slotProbeRow['end_time'] ?? '');
+        $probe_time_label = $format_workload_time($slotProbeRow['start_time'], $probe_end);
+        if (!isset($instructor_slot_counts[$probe_group_key])) {
+            $instructor_slot_counts[$probe_group_key] = [];
+        }
+        $instructor_slot_counts[$probe_group_key][$probe_time_label] = (int)($instructor_slot_counts[$probe_group_key][$probe_time_label] ?? 0) + 1;
+    }
+
+    foreach ($schedules as $row) {
+        if (($row['day'] ?? '') === 'Saturday') {
+            $group_key = 'Saturday';
+        } elseif ($instructor_workload_mode === 'individual') {
+            $period = (strtotime($row['start_time']) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
+            $group_key = $row['day'] . '/' . $period;
+        } else {
+            $dg = $day_to_group[$row['day']] ?? $row['day'];
             $period = (strtotime($row['start_time']) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
             $group_key = $dg . '/' . $period;
         }
+        $basePairMultiplier = $get_paired_group_multiplier((string)$group_key, (string)$instructor_workload_mode);
         if (!isset($instructor_workload[$group_key])) {
             $instructor_workload[$group_key] = [];
         }
         $row['report_course_code'] = $format_course_code($row, $job_input_cache);
-        $row['report_time_label'] = $format_workload_time($row['start_time'], $row['end_time']);
+        $row['report_end_time'] = (string)($row['report_end_time'] ?? $row['end_time'] ?? '');
+        $row['report_time_label'] = $format_workload_time($row['start_time'], $row['report_end_time']);
+        $slotRowCount = (int)($instructor_slot_counts[$group_key][$row['report_time_label']] ?? 1);
+        $effectivePairMultiplier = $get_effective_slot_multiplier((float)$basePairMultiplier, $slotRowCount);
+        $row['report_pair_multiplier'] = (float)$effectivePairMultiplier;
         $row['report_students'] = (int) ($row['room_capacity'] ?? 0) > 0 ? (int) $row['room_capacity'] : '';
         $instructor_workload[$group_key][] = $row;
-        $subject_unit_key = (int) ($row['subject_id'] ?? 0);
-        if ($subject_unit_key <= 0) {
-            $subject_unit_key = trim((string) ($row['subject_code'] ?? ''));
-        }
+        $subject_unit_key = $build_subject_unit_key($row);
         if ($subject_unit_key !== '' && !isset($counted_instructor_subject_units[$subject_unit_key])) {
-            $total_units += (float)($row['credits'] ?? 0);
+            $total_units += $get_row_units($row) * $effectivePairMultiplier;
             $counted_instructor_subject_units[$subject_unit_key] = true;
         }
-        $row_hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0);
+        $row_hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * $effectivePairMultiplier;
         $total_hours += $row_hours;
 
         $overload_subject_key = (int)($row['subject_id'] ?? 0);
@@ -665,6 +1106,104 @@ if (!empty($instructor_id)) {
     $total_preparations = count($unique_subject_ids);
 
     $is_overloaded = $total_hours > $weekly_hour_limit;
+    if ($is_overloaded && !empty($overload_subjects)) {
+        $remainingOverload = round(max(0, $total_hours - $weekly_hour_limit), 2);
+        $dayOrder = [
+            'Monday' => 1,
+            'Tuesday' => 2,
+            'Wednesday' => 3,
+            'Thursday' => 4,
+            'Friday' => 5,
+            'Saturday' => 6,
+        ];
+        $candidateRows = [];
+        foreach ($instructor_workload as $groupKey => $groupRows) {
+            foreach ($groupRows as $workloadRow) {
+                $rowPairMultiplier = (float)($workloadRow['report_pair_multiplier'] ?? $get_paired_group_multiplier((string)$groupKey, (string)$instructor_workload_mode));
+                $rowHours = round((float)($workloadRow['scheduled_hours'] ?? $workloadRow['hours_per_week'] ?? 0) * $rowPairMultiplier, 2);
+                if ($rowHours <= 0) {
+                    continue;
+                }
+                $subjectKey = (int)($workloadRow['subject_id'] ?? 0);
+                if ($subjectKey <= 0) {
+                    $subjectKey = strtoupper(trim((string)($workloadRow['subject_code'] ?? '')));
+                } else {
+                    $subjectKey = (string)$subjectKey;
+                }
+                $subjectKey = strtoupper(trim((string)$subjectKey));
+                $subjectTotal = (float)($overload_subjects[$subjectKey]['hours'] ?? 0);
+                $candidateRows[] = [
+                    'row' => $workloadRow,
+                    'row_hours' => $rowHours,
+                    'subject_key' => $subjectKey,
+                    'subject_total_hours' => $subjectTotal,
+                    'day_rank' => (int)($dayOrder[$workloadRow['day'] ?? ''] ?? 99),
+                ];
+            }
+        }
+        usort($candidateRows, static function (array $a, array $b): int {
+            $subjectCompare = (float)$b['subject_total_hours'] <=> (float)$a['subject_total_hours'];
+            if ($subjectCompare !== 0) {
+                return $subjectCompare;
+            }
+            $hoursCompare = (float)$b['row_hours'] <=> (float)$a['row_hours'];
+            if ($hoursCompare !== 0) {
+                return $hoursCompare;
+            }
+            $dayCompare = (int)$b['day_rank'] <=> (int)$a['day_rank'];
+            if ($dayCompare !== 0) {
+                return $dayCompare;
+            }
+            return strcmp((string)($b['row']['start_time'] ?? ''), (string)($a['row']['start_time'] ?? ''));
+        });
+
+        $selectedOverloadRows = [];
+        foreach ($candidateRows as $candidateRow) {
+            if ($remainingOverload <= 0) {
+                break;
+            }
+            $selectedOverloadRows[] = $candidateRow;
+            $remainingOverload = round($remainingOverload - (float)$candidateRow['row_hours'], 2);
+        }
+
+        $selectedOverloadSubjects = [];
+        foreach ($selectedOverloadRows as $selectedRow) {
+            $row = $selectedRow['row'];
+            $subjectKey = (string)$selectedRow['subject_key'];
+            if (!isset($selectedOverloadSubjects[$subjectKey])) {
+                $selectedOverloadSubjects[$subjectKey] = [
+                    'subject_code' => (string)($row['subject_code'] ?? ''),
+                    'subject_name' => (string)($row['subject_name'] ?? ''),
+                    'hours' => 0.0,
+                ];
+            }
+            $selectedOverloadSubjects[$subjectKey]['hours'] += (float)$selectedRow['row_hours'];
+            $overload_subject_rows[] = [
+                'schedule_id' => (int)($row['id'] ?? 0),
+                'subject_key' => $subjectKey,
+                'subject_code' => (string)($row['subject_code'] ?? ''),
+                'subject_name' => (string)($row['subject_name'] ?? ''),
+                'time_label' => (string)($row['report_time_label'] ?? ''),
+                'course_code' => (string)($row['report_course_code'] ?? ''),
+                'students' => (string)($row['report_students'] ?? ''),
+                'units' => $get_row_units($row),
+                'overload_hours' => (float)$selectedRow['row_hours'],
+                'room_number' => (string)($row['room_number'] ?? ''),
+            ];
+        }
+        foreach ($selectedOverloadSubjects as &$selectedOverloadSubject) {
+            $selectedOverloadSubject['hours'] = round((float)$selectedOverloadSubject['hours'], 2);
+        }
+        unset($selectedOverloadSubject);
+        uasort($selectedOverloadSubjects, function ($a, $b) {
+            $hoursCompare = (float)($b['hours'] ?? 0) <=> (float)($a['hours'] ?? 0);
+            if ($hoursCompare !== 0) {
+                return $hoursCompare;
+            }
+            return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+        });
+        $overload_subjects = $selectedOverloadSubjects;
+    }
     if ($is_overloaded) {
         try {
             $stmt = $pdo->prepare("
@@ -687,6 +1226,125 @@ if (!empty($instructor_id)) {
             $overload_approved = false;
         }
     }
+
+    // Default "actual load" values (before optional overload removal).
+    $actual_total_units = $total_units;
+    $actual_total_hours = $total_hours;
+    $actual_total_preparations = $total_preparations;
+    $actual_total_units_with_deloading = $total_units_with_deloading;
+
+    // If overload is approved, move overload subjects out of actual-load table.
+    if ($is_overloaded && $overload_approved && !empty($overload_subject_rows)) {
+        $overload_schedule_ids = [];
+        foreach ($overload_subject_rows as $orow) {
+            $scheduleId = (int)($orow['schedule_id'] ?? 0);
+            if ($scheduleId > 0) {
+                $overload_schedule_ids[$scheduleId] = true;
+            }
+        }
+
+        foreach ($instructor_workload as $groupKey => $groupRows) {
+            $instructor_workload[$groupKey] = array_values(array_filter($groupRows, static function (array $row) use ($overload_schedule_ids): bool {
+                $scheduleId = (int)($row['id'] ?? 0);
+                if ($scheduleId <= 0) {
+                    return true;
+                }
+                return !isset($overload_schedule_ids[$scheduleId]);
+            }));
+        }
+
+        $actual_total_units = 0.0;
+        $actual_total_hours = 0.0;
+        $actual_subject_keys = [];
+        $actual_preparations = [];
+        foreach ($instructor_workload as $groupKey => $groupRows) {
+            foreach ($groupRows as $row) {
+                $rowPairMultiplier = (float)($row['report_pair_multiplier'] ?? $get_paired_group_multiplier((string)$groupKey, (string)$instructor_workload_mode));
+                $actual_total_hours += (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * $rowPairMultiplier;
+                $subjectUnitKey = $build_subject_unit_key($row);
+                if ($subjectUnitKey !== '' && !isset($actual_subject_keys[$subjectUnitKey])) {
+                    $actual_total_units += $get_row_units($row) * $rowPairMultiplier;
+                    $actual_subject_keys[$subjectUnitKey] = true;
+                }
+                $subjectPrepKey = (int)($row['subject_id'] ?? 0);
+                if ($subjectPrepKey > 0) {
+                    $actual_preparations[$subjectPrepKey] = true;
+                }
+            }
+        }
+        $actual_total_units = round($actual_total_units, 2);
+        $actual_total_hours = round($actual_total_hours, 2);
+        $actual_total_preparations = count($actual_preparations);
+        $actual_total_units_with_deloading = $actual_total_units
+            + (float)($selected_instructor['designation_units'] ?? 0)
+            + (float)($selected_instructor['research_extension_units'] ?? 0)
+            + (float)($selected_instructor['special_assignment_units'] ?? 0);
+    }
+
+    // Check for PRAISE assignments (only for Permanent instructors exceeding 24 units)
+    $instructor_status = (string)($selected_instructor['status'] ?? '');
+    if ($instructor_status === 'Permanent') {
+        foreach ($schedules as $row) {
+            if ((int)($row['is_praise'] ?? 0) === 1) {
+                $is_praise = true;
+                $praise_row_units = $get_row_units($row);
+                $praise_row_hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0);
+                
+                $praise_subject_key = (int)($row['subject_id'] ?? 0);
+                if ($praise_subject_key <= 0) {
+                    $praise_subject_key = strtoupper(trim((string)($row['subject_code'] ?? '')));
+                }
+                
+                if (!isset($praise_subjects[$praise_subject_key])) {
+                    $praise_subjects[$praise_subject_key] = [
+                        'subject_code' => (string)($row['subject_code'] ?? ''),
+                        'subject_name' => (string)($row['subject_name'] ?? ''),
+                        'units' => 0.0,
+                    ];
+                }
+                $praise_subjects[$praise_subject_key]['units'] += $praise_row_units;
+                
+                $praise_subject_rows[] = [
+                    'schedule_id' => (int)($row['id'] ?? 0),
+                    'subject_key' => $praise_subject_key,
+                    'subject_code' => (string)($row['subject_code'] ?? ''),
+                    'subject_name' => (string)($row['subject_name'] ?? ''),
+                    'time_label' => $format_schedule_time_label($row['start_time'], $row['end_time']),
+                    'course_code' => $format_course_code($row, $job_input_cache),
+                    'students' => (string)((int)($row['room_capacity'] ?? 0) > 0 ? (int)$row['room_capacity'] : ''),
+                    'units' => $praise_row_units,
+                    'praise_hours' => $praise_row_hours,
+                    'room_number' => (string)($row['room_number'] ?? ''),
+                ];
+            }
+        }
+        
+        foreach ($praise_subjects as &$praise_subject) {
+            $praise_subject['units'] = round((float)$praise_subject['units'], 2);
+        }
+        unset($praise_subject);
+        uasort($praise_subjects, function ($a, $b) {
+            $unitsCompare = (float)($b['units'] ?? 0) <=> (float)($a['units'] ?? 0);
+            if ($unitsCompare !== 0) {
+                return $unitsCompare;
+            }
+            return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+        });
+    }
+}
+
+foreach ($workload_order as $workloadGroupKey) {
+    if ($workloadGroupKey === 'Saturday') {
+        $consultation_time_options_by_group[$workloadGroupKey] = [];
+        continue;
+    }
+    $periodForGroup = (strpos($workloadGroupKey, 'Afternoon') !== false) ? 'Afternoon' : 'Morning';
+    $consultation_time_options_by_group[$workloadGroupKey] = array_values(array_filter(
+        $workload_time_template[$periodForGroup] ?? [],
+        static function ($label) use ($break_time_label): bool {
+            return (string)$label !== $break_time_label;
+        }
+    ));
 }
 
 $export_type = strtolower(trim((string) ($_GET['export'] ?? '')));
@@ -749,7 +1407,7 @@ if (in_array($export_type, ['csv', 'excel'], true)) {
             'Subject Code' => (string) ($row['subject_code'] ?? ''),
             'Subject Name' => (string) ($row['subject_name'] ?? ''),
             'Description' => $format_subject_description($row),
-            'Units' => (string) ($row['credits'] ?? ''),
+            'Units' => number_format($get_row_units($row), 2),
             'Hours' => number_format((float) ($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0), 2),
             'Instructor' => (string) ($row['instructor_name'] ?? ''),
             'Room' => (string) ($row['room_number'] ?? ''),
@@ -882,7 +1540,7 @@ if (isset($_GET['print'])) {
             padding: 3px 8px;
         }
         .schedule-report-table .subject-code-cell {
-            background: #fff35c;
+            background: #fff;
             font-weight: 700;
             text-align: center;
         }
@@ -996,6 +1654,9 @@ if (isset($_GET['print'])) {
             margin-top: 26px;
             page-break-inside: avoid;
         }
+        .faculty-signatures.instructor-signatures {
+            margin-top: 16px;
+        }
         .faculty-signature-row {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -1015,6 +1676,26 @@ if (isset($_GET['print'])) {
             text-align: left;
             font-weight: 700;
             margin-bottom: 30px;
+        }
+        .faculty-signature-label-centered {
+            text-align: center;
+        }
+        .faculty-signature-row-label {
+            margin-top: 22px;
+            margin-bottom: 8px;
+            font-weight: 700;
+            text-align: left;
+        }
+        .instructor-signatures .faculty-signature-row {
+            margin-top: 14px;
+        }
+        .instructor-signatures .faculty-signature-name {
+            border-top: none;
+            min-width: 300px;
+            padding-top: 0;
+        }
+        .instructor-signatures .faculty-signature-label {
+            margin-bottom: 12px;
         }
         .faculty-signature-name {
             font-weight: 700;
@@ -1188,27 +1869,33 @@ if (isset($_GET['print'])) {
             transform: scale(1.08);
             box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
         }
+        body.printing-block .no-print {
+            display: none !important;
+        }
         @media print {
             @page {
-                size: auto;
-                margin: 0.3in;
+                size: Letter portrait;
+                margin: 0.2in;
             }
             html,
-            body {
+            body.report-page {
                 width: auto;
                 min-height: auto;
                 margin: 0;
                 padding: 0;
-                font-size: 9.5px;
+                font-size: 9px;
                 background: #fff;
             }
-            .container {
+            body.report-page .container {
                 width: 100%;
-                max-width: 7.35in;
+                max-width: 8.1in;
                 margin: 0 auto;
                 padding: 0;
             }
             .block-print-btn {
+                display: none !important;
+            }
+            .no-print {
                 display: none !important;
             }
             body.printing-block .schedule-section-block:not(.printing),
@@ -1221,14 +1908,19 @@ if (isset($_GET['print'])) {
             body.printing-block .report-signatory-settings {
                 display: none !important;
             }
+            body.printing-block .schedule-report.printing,
             body.printing-block .schedule-section-block.printing,
             body.printing-block .workload-sheet.printing {
                 width: 100%;
-                max-width: 7.35in;
+                max-width: 8.1in;
                 margin: 0 auto;
                 box-sizing: border-box;
                 break-inside: avoid;
                 page-break-inside: avoid;
+                page-break-after: avoid;
+            }
+            body.printing-block .schedule-report.printing {
+                display: block !important;
             }
             .schedule-section-block,
             .workload-sheet,
@@ -1239,79 +1931,96 @@ if (isset($_GET['print'])) {
             .schedule-section-block {
                 margin-bottom: 0;
             }
+            .workload-sheet {
+                margin-bottom: 0;
+                border-width: 1px;
+                padding: 6px 8px 4px;
+            }
             .report-main-header {
-                margin-bottom: 8px;
+                margin-bottom: 3px;
+                line-height: 1.05;
             }
             .report-main-header img {
-                width: 46px;
-                margin-bottom: 3px;
+                width: 36px;
+                margin-bottom: 1px;
             }
             .report-main-header .country-line {
-                font-size: 9px;
+                font-size: 7px;
             }
             .report-main-header .university-line {
-                font-size: 13px;
+                font-size: 10px;
             }
             .report-main-header .department-line {
-                font-size: 11px;
+                font-size: 8px;
             }
             .report-main-header .title-line {
-                font-size: 10px;
+                font-size: 8px;
             }
             .report-main-header .term-line {
-                font-size: 9px;
+                font-size: 7px;
+            }
+            .workload-meta {
+                margin: 0 0 2px;
+                gap: 1px 8px;
+                font-size: 7px;
+            }
+            .workload-meta .meta-line {
+                padding-bottom: 1px;
             }
             .schedule-section-header {
-                padding: 4px 8px;
-                font-size: 10px;
+                padding: 2px 6px;
+                font-size: 8px;
             }
             .schedule-report-table,
             .workload-table,
             .workload-summary {
-                font-size: 8px;
+                font-size: 7px;
             }
             .schedule-report-table th,
             .schedule-report-table td,
             .workload-table th,
             .workload-table td,
             .workload-summary td {
-                padding: 2px 3px;
+                padding: 0.5px 1.5px;
             }
             .schedule-report-table .day-group-header td {
-                font-size: 9px;
-                padding: 2px 3px;
+                font-size: 7px;
+                padding: 1px 2px;
             }
             .schedule-report-table .description-cell {
                 line-height: 1.05;
             }
             .report-signature-sheet {
-                margin-top: 8px;
-                padding: 8px 0 0;
+                margin-top: 2px;
+                padding: 2px 0 0;
             }
             .report-signature-grid {
-                gap: 10px;
-                margin-bottom: 8px;
+                gap: 8px;
+                margin-bottom: 2px;
             }
             .signature-label {
-                font-size: 8px;
-                margin-bottom: 10px;
+                font-size: 7px;
+                margin-bottom: 2px;
             }
             .signature-name {
-                font-size: 10px;
+                font-size: 8px;
             }
             .signature-title,
             .report-signature-meta,
             .report-contact-lines div,
             .report-contact-lines a {
-                font-size: 8px;
+                font-size: 7px;
             }
             .report-contact-footer {
-                margin-top: 6px;
-                padding-top: 2px;
+                margin-top: 1px;
+                padding-top: 1px;
                 gap: 8px;
             }
             .report-contact-logos img {
-                width: 30px;
+                width: 24px;
+            }
+            .print-footer {
+                display: none !important;
             }
         }
     </style>
@@ -1350,7 +2059,7 @@ if (isset($_GET['print'])) {
     </style>
     <?php endif; ?>
 </head>
-<body>
+<body class="report-page">
     <?php if (!isset($print_mode)): ?>
     <div class="header">
         <div class="header-content">
@@ -1440,9 +2149,6 @@ if (isset($_GET['print'])) {
             <?php if (empty($schedules)): ?>
                 <p>No schedules found matching the criteria. Generate and publish a schedule first.</p>
             <?php elseif (!empty($instructor_id)): ?>
-                <?php
-                    $workload_order = ['MTh/Morning', 'MTh/Afternoon', 'Wed/Morning', 'Wed/Afternoon', 'TF/Morning', 'TF/Afternoon', 'Saturday'];
-                ?>
                 <div class="workload-sheet">
                     <div class="block-print-container">
                         <div class="report-main-header">
@@ -1457,17 +2163,16 @@ if (isset($_GET['print'])) {
                     </div>
 
                     <div class="workload-meta">
-
                         <div class="meta-line"><span class="meta-label">Name:</span><span><?php echo htmlspecialchars($selected_instructor['full_name'] ?? ''); ?></span></div>
-                        <div class="meta-line"><span class="meta-label">Educ'l Qualification:</span><span>-</span></div>
-                        <div class="meta-line"><span class="meta-label">Years in Service:</span><span>-</span></div>
-                        <div class="meta-line"><span class="meta-label">Major:</span><span>-</span></div>
+                        <div class="meta-line"><span class="meta-label">Educ'l Qualification:</span><span><?php echo htmlspecialchars((string)(trim((string)($selected_instructor['education'] ?? '')) !== '' ? $selected_instructor['education'] : '-')); ?></span></div>
+                        <div class="meta-line"><span class="meta-label">Years in Service:</span><span><?php echo htmlspecialchars((string)(trim((string)($selected_instructor['service_years'] ?? '')) !== '' ? $selected_instructor['service_years'] : '-')); ?></span></div>
+                        <div class="meta-line"><span class="meta-label">Major:</span><span><?php echo htmlspecialchars((string)(trim((string)($selected_instructor['major_display'] ?? '')) !== '' ? $selected_instructor['major_display'] : '-')); ?></span></div>
                         <div class="meta-line"><span class="meta-label">Status:</span><span><?php echo htmlspecialchars($selected_instructor['status'] ?? 'Instructor'); ?></span></div>
-                        <div class="meta-line"><span class="meta-label">Eligibility/PRC:</span><span>-</span></div>
+                        <div class="meta-line"><span class="meta-label">Eligibility/PRC:</span><span><?php echo htmlspecialchars((string)(trim((string)($selected_instructor['eligibility'] ?? '')) !== '' ? $selected_instructor['eligibility'] : '-')); ?></span></div>
                     </div>
 
                     <?php if ($is_overloaded && !$overload_approved && !isset($print_mode)): ?>
-                        <div class="error" style="margin-bottom: 12px;">
+                        <div class="error no-print" style="margin-bottom: 12px;">
                             <strong>Overload Warning:</strong>
                             This instructor has <strong><?php echo number_format($total_hours, 2); ?> hours</strong>,
                             which exceeds the 30-hour weekly limit by
@@ -1492,7 +2197,7 @@ if (isset($_GET['print'])) {
                             </form>
                         </div>
                     <?php elseif ($is_overloaded && $overload_approved): ?>
-                        <div class="success" style="margin-bottom: 12px;">
+                        <div class="success no-print" style="margin-bottom: 12px;">
                             <strong>Overload Approved:</strong>
                             <?php echo number_format($total_hours, 2); ?> hours approved by
                             <?php echo htmlspecialchars($overload_approval['approver_name'] ?? 'Admin'); ?>
@@ -1513,6 +2218,46 @@ if (isset($_GET['print'])) {
                         </div>
                     <?php endif; ?>
 
+                    <?php if (!isset($print_mode)): ?>
+                    <div class="no-print" style="margin-bottom: 10px; border: 1px solid #ddd; padding: 10px;">
+                        <strong>Vacant Slot Consultation</strong>
+                        <form method="POST" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                            <input type="hidden" name="consultation_instructor_id" value="<?php echo (int)$instructor_id; ?>">
+                            <select id="consultation_day_group" name="consultation_day_group" required>
+                                <?php foreach ($workload_order as $groupKey): ?>
+                                    <option value="<?php echo htmlspecialchars($groupKey); ?>"><?php echo htmlspecialchars($workload_group_titles[$groupKey] ?? $groupKey); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <select id="consultation_time_label" name="consultation_time_label" required></select>
+                            <input type="text" name="consultation_note" value="Consultation" maxlength="120" placeholder="Consultation note">
+                            <button type="submit" name="add_consultation_slot" class="btn-primary">Save Consultation Slot</button>
+                        </form>
+                        <?php if (!empty($consultation_slot_list)): ?>
+                        <table class="workload-summary" style="margin-top:8px;">
+                            <tr>
+                                <td class="summary-label">Day/Group</td>
+                                <td>Time</td>
+                                <td>Note</td>
+                                <td>Action</td>
+                            </tr>
+                            <?php foreach ($consultation_slot_list as $slotRow): ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars((string)($workload_group_titles[$slotRow['day_group']] ?? $slotRow['day_group'])); ?></td>
+                                <td><?php echo htmlspecialchars((string)($slotRow['time_label'] ?? '')); ?></td>
+                                <td><?php echo htmlspecialchars((string)($slotRow['note'] ?? 'Consultation')); ?></td>
+                                <td>
+                                    <form method="POST" style="display:inline;">
+                                        <input type="hidden" name="consultation_slot_id" value="<?php echo (int)($slotRow['id'] ?? 0); ?>">
+                                        <button type="submit" name="delete_consultation_slot" class="btn-icon btn-delete">Remove</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </table>
+                        <?php endif; ?>
+                    </div>
+                    <?php endif; ?>
+
                     <table class="workload-table">
                         <thead>
                             <tr>
@@ -1528,21 +2273,100 @@ if (isset($_GET['print'])) {
                         </thead>
                         <tbody>
                             <?php foreach ($workload_order as $group_key): ?>
-                                <?php if (empty($instructor_workload[$group_key])) continue; ?>
+                                <?php
+                                $groupRows = $instructor_workload[$group_key] ?? [];
+                                $groupPairMultiplier = $get_paired_group_multiplier((string)$group_key, (string)$instructor_workload_mode);
+                                $periodForGroup = (strpos($group_key, 'Afternoon') !== false) ? 'Afternoon' : 'Morning';
+                                $slotLabels = $workload_time_template[$periodForGroup] ?? [];
+                                if ($group_key === 'Saturday') {
+                                    $slotLabels = [''];
+                                }
+                                if (!empty($groupRows)) {
+                                    foreach ($groupRows as $fallbackRow) {
+                                        $actualLabel = (string)($fallbackRow['report_time_label'] ?? '');
+                                        if ($actualLabel !== '' && !in_array($actualLabel, $slotLabels, true)) {
+                                            $slotLabels[] = $actualLabel;
+                                        }
+                                    }
+                                    $slotLabels = array_values(array_unique(array_filter($slotLabels)));
+                                }
+                                ?>
                                 <tr class="workload-group">
                                     <td colspan="8"><?php echo htmlspecialchars($workload_group_titles[$group_key] ?? $group_key); ?></td>
                                 </tr>
-                                <?php foreach ($instructor_workload[$group_key] as $r): ?>
-                                    <tr>
-                                        <td><?php echo htmlspecialchars($r['report_time_label']); ?></td>
-                                        <td><?php echo htmlspecialchars($r['subject_code']); ?></td>
-                                        <td><?php echo htmlspecialchars($format_subject_description($r)); ?></td>
-                                        <td><?php echo htmlspecialchars($r['report_course_code']); ?></td>
-                                        <td><?php echo htmlspecialchars((string) $r['report_students']); ?></td>
-                                        <td><?php echo htmlspecialchars($r['credits']); ?></td>
-                                        <td><?php echo htmlspecialchars(number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0), 2)); ?></td>
-                                        <td><?php echo htmlspecialchars($r['room_number']); ?></td>
-                                    </tr>
+                                <?php foreach ($slotLabels as $slotLabel): ?>
+                                    <?php
+                                    if ($group_key === 'Saturday') {
+                                        $slotRows = !empty($groupRows) ? [reset($groupRows)] : [];
+                                    } else {
+                                        $slotRows = array_values(array_filter($groupRows, static function (array $row) use ($slotLabel): bool {
+                                            return (string)($row['report_time_label'] ?? '') === (string)$slotLabel;
+                                        }));
+                                    }
+                                    $displaySlotLabel = ($group_key === 'Saturday') ? '' : (string)$slotLabel;
+                                    $slotPairMultiplier = $get_effective_slot_multiplier((float)$groupPairMultiplier, count($slotRows));
+                                    $forceDayLabel = (bool)preg_match('/^(MTh|TF)\//', (string)$group_key);
+                                    ?>
+                                    <?php if ($slotLabel === $break_time_label): ?>
+                                        <tr class="lunch-row">
+                                            <td><?php echo htmlspecialchars($displaySlotLabel); ?></td>
+                                            <td colspan="7">BREAK TIME</td>
+                                        </tr>
+                                    <?php elseif (empty($slotRows)): ?>
+                                        <?php $consultationRow = $consultation_slot_map[$group_key][$slotLabel] ?? null; ?>
+                                        <tr>
+                                            <td><?php echo htmlspecialchars($displaySlotLabel); ?></td>
+                                            <td></td>
+                                            <td><?php echo htmlspecialchars((string)($consultationRow['note'] ?? '')); ?></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                    <?php else: ?>
+                                        <?php
+                                        // Group subjects by subject_type
+                                        $subjsByType = [];
+                                        foreach ($slotRows as $slotRow) {
+                                            $subjType = (string)($slotRow['subject_type'] ?? 'major');
+                                            if (!isset($subjsByType[$subjType])) {
+                                                $subjsByType[$subjType] = [];
+                                            }
+                                            $subjsByType[$subjType][] = $slotRow;
+                                        }
+                                        // Order: major first, then minor
+                                        $typeOrder = ['major', 'minor'];
+                                        foreach ($typeOrder as $typeKey) {
+                                            if (isset($subjsByType[$typeKey])) {
+                                                $typeLabel = (strtoupper($typeKey) . ' SUBJECT');
+                                                $typeSubjects = $subjsByType[$typeKey];
+                                                usort($typeSubjects, static function (array $a, array $b) use ($meeting_kind_rank): int {
+                                                    $meetingCompare = $meeting_kind_rank($a) <=> $meeting_kind_rank($b);
+                                                    if ($meetingCompare !== 0) {
+                                                        return $meetingCompare;
+                                                    }
+                                                    return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+                                                });
+                                                foreach ($typeSubjects as $slotRow):
+                                                    $slotTimeLabel = $format_slot_label_with_day((string)$displaySlotLabel, $slotRow, count($slotRows), $forceDayLabel);
+                                                    ?>
+                                                    <tr>
+                                                        <td><?php echo htmlspecialchars($slotTimeLabel); ?></td>
+                                                        <td><?php echo htmlspecialchars((string)($slotRow['subject_code'] ?? '')); ?></td>
+                                                        <td><?php echo htmlspecialchars($format_subject_description($slotRow)); ?></td>
+                                                        <td><?php echo htmlspecialchars((string)($slotRow['report_course_code'] ?? '')); ?></td>
+                                                        <td><?php echo htmlspecialchars((string)($slotRow['report_students'] ?? '')); ?></td>
+                                                        <td><?php echo htmlspecialchars(number_format($get_row_units($slotRow) * $slotPairMultiplier, 2)); ?></td>
+                                                        <td><?php echo htmlspecialchars(number_format((float)($slotRow['scheduled_hours'] ?? $slotRow['hours_per_week'] ?? 0) * $slotPairMultiplier, 2)); ?></td>
+                                                        <td><?php echo htmlspecialchars((string)($slotRow['room_number'] ?? '')); ?></td>
+                                                    </tr>
+                                                    <?php
+                                                endforeach;
+                                            }
+                                        }
+                                        ?>
+                                    <?php endif; ?>
                                 <?php endforeach; ?>
                             <?php endforeach; ?>
                         </tbody>
@@ -1551,70 +2375,69 @@ if (isset($_GET['print'])) {
                     <table class="workload-summary">
                         <tr>
                             <td class="summary-label">No. of Units</td>
-                            <td><?php echo number_format($total_units_with_deloading, 2); ?></td>
-                            <td class="summary-label">No. of Hours</td>
-                            <td><?php echo number_format($total_hours, 2); ?></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td><?php echo number_format($actual_total_units_with_deloading, 2); ?></td>
+                            <td><?php echo number_format($actual_total_hours, 2); ?></td>
+                            <td></td>
                         </tr>
+                        <?php if ($selected_instructor['status'] === 'Permanent'): ?>
                         <tr>
                             <td class="summary-label">Designation</td>
                             <td><?php echo htmlspecialchars(($selected_instructor['designation'] ?? '') !== '' ? $selected_instructor['designation'] : '-'); ?></td>
-                            <td class="summary-label">Units Deloading</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
                             <td><?php echo number_format((float)($selected_instructor['designation_units'] ?? 0), 2); ?></td>
+                            <td></td>
+                            <td></td>
                         </tr>
                         <tr>
                             <td class="summary-label">Research/Extension</td>
                             <td><?php echo htmlspecialchars($formatResearchExtensionType($selected_instructor['research_extension'] ?? '')); ?></td>
-                            <td class="summary-label">Units Deloading</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
                             <td><?php echo number_format((float)($selected_instructor['research_extension_units'] ?? 0), 2); ?></td>
+                            <td></td>
+                            <td></td>
                         </tr>
                         <tr>
                             <td class="summary-label">Add: Special Assignment</td>
                             <td><?php echo htmlspecialchars(($selected_instructor['special_assignment'] ?? '') !== '' ? $selected_instructor['special_assignment'] : '-'); ?></td>
-                            <td class="summary-label">Units Deloading</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
                             <td><?php echo number_format((float)($selected_instructor['special_assignment_units'] ?? 0), 2); ?></td>
+                            <td></td>
+                            <td></td>
                         </tr>
+                        <?php endif; ?>
                         <tr>
                             <td class="summary-label">No. of Preparation</td>
-                            <td><?php echo (int)$total_preparations; ?></td>
+                            <td><?php echo (int)$actual_total_preparations; ?></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                        <tr>
                             <td class="summary-label">Total No. of Units</td>
-                            <td><?php echo number_format($total_units_with_deloading, 2); ?></td>
+                            <td>Regular Load</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td><?php echo number_format($selected_instructor['status'] === 'Permanent' ? $actual_total_units_with_deloading : $actual_total_units, 2); ?></td>
+                            <td><?php echo number_format($actual_total_hours, 2); ?></td>
+                            <td></td>
                         </tr>
                     </table>
 
-                    <div class="faculty-signatures">
-                        <div class="faculty-signature-row">
-                            <div class="faculty-signature-block">
-                                <div class="faculty-signature-label">Prepared by:</div>
-                                <div class="faculty-signature-name"><?php echo htmlspecialchars($signatories['noted_by_name']); ?></div>
-                                <div class="faculty-signature-title"><?php echo htmlspecialchars($signatories['noted_by_title']); ?></div>
-                            </div>
-                            <div class="faculty-signature-block">
-                                <div class="faculty-signature-label">Conformed:</div>
-                                <div class="faculty-signature-name"><?php echo htmlspecialchars($selected_instructor['full_name'] ?? ''); ?></div>
-                                <div class="faculty-signature-title"><?php echo htmlspecialchars(($selected_instructor['status'] ?? 'Instructor') ?: 'Instructor'); ?></div>
-                            </div>
-                        </div>
-                        <div class="faculty-signature-row single">
-                            <div class="faculty-signature-block">
-                                <div class="faculty-signature-label">Certified Correct:</div>
-                                <div class="faculty-signature-name"><?php echo htmlspecialchars($signatories['recommending_name']); ?></div>
-                                <div class="faculty-signature-title"><?php echo htmlspecialchars($signatories['recommending_title']); ?></div>
-                            </div>
-                        </div>
-                        <div class="faculty-signature-row">
-                            <div class="faculty-signature-block">
-                                <div class="faculty-signature-label">Recommending Approval:</div>
-                                <div class="faculty-signature-name"><?php echo htmlspecialchars($signatories['approved_by_name']); ?></div>
-                                <div class="faculty-signature-title"><?php echo htmlspecialchars($signatories['approved_by_title']); ?></div>
-                            </div>
-                            <div class="faculty-signature-block">
-                                <div class="faculty-signature-label">Approved:</div>
-                                <div class="faculty-signature-name"><?php echo htmlspecialchars($signatories['prepared_by_name']); ?></div>
-                                <div class="faculty-signature-title"><?php echo htmlspecialchars($signatories['prepared_by_title']); ?></div>
-                            </div>
-                        </div>
-                    </div>
-                    <?php $renderReportFooter($signatories); ?>
+                    <?php $renderInstructorFooter($selected_instructor, $signatories); ?>
                 </div>
             <?php else: ?>
                 <?php foreach ($by_section as $sectionKey => $section): ?>
@@ -1646,38 +2469,111 @@ if (isset($_GET['print'])) {
                         </thead>
                         <tbody>
                             <?php
-                            $order = ['MTh/A.M.', 'MTh/P.M.', 'TF/A.M.', 'TF/P.M.', 'Wed/A.M.', 'Wed/P.M.', 'Saturday'];
+                            $order = (($section['day_group_mode'] ?? 'paired') === 'individual')
+                                ? ['Monday/A.M.', 'Monday/P.M.', 'Tuesday/A.M.', 'Tuesday/P.M.', 'Wednesday/A.M.', 'Wednesday/P.M.', 'Thursday/A.M.', 'Thursday/P.M.', 'Friday/A.M.', 'Friday/P.M.', 'Saturday']
+                                : ['MTh/A.M.', 'MTh/P.M.', 'TF/A.M.', 'TF/P.M.', 'Wed/A.M.', 'Wed/P.M.', 'Saturday'];
                             foreach ($order as $groupKey):
-                                if (empty($section['by_day_group'][$groupKey])) continue;
-                                $rows = $section['by_day_group'][$groupKey];
+                                $rows = $section['by_day_group'][$groupKey] ?? [];
+                                $sectionPairMultiplier = $get_paired_group_multiplier((string)$groupKey, (string)($section['day_group_mode'] ?? 'paired'));
                                 $groupTitle = $section_group_titles[$groupKey] ?? $groupKey;
+                                
+                                // Group rows by time slot
+                                $rows_by_time = [];
+                                foreach ($rows as $row_for_slot) {
+                                    $slot_label = (string)($row_for_slot['report_time_label'] ?? '');
+                                    if (!isset($rows_by_time[$slot_label])) {
+                                        $rows_by_time[$slot_label] = [];
+                                    }
+                                    $rows_by_time[$slot_label][] = $row_for_slot;
+                                }
+                                
+                                // Get time slots for this group
+                                $time_slots = $section_time_slots_by_group[$groupKey] ?? [];
+                                if ($groupKey === 'Saturday') {
+                                    $time_slots = [''];
+                                }
+                                if (!empty($rows_by_time)) {
+                                    foreach (array_keys($rows_by_time) as $actualSlotLabel) {
+                                        if ($actualSlotLabel !== '' && !in_array($actualSlotLabel, $time_slots, true)) {
+                                            $time_slots[] = $actualSlotLabel;
+                                        }
+                                    }
+                                    $time_slots = array_values(array_unique(array_filter($time_slots, static function ($label) use ($groupKey) {
+                                        return $groupKey === 'Saturday' ? true : (string)$label !== '';
+                                    })));
+                                }
+                                if (empty($time_slots)) {
+                                    $time_slots = [''];
+                                }
                             ?>
                             <tr class="day-group-header">
                                 <td><?php echo htmlspecialchars($groupTitle); ?></td>
                                 <td colspan="6"></td>
                             </tr>
-                            <?php if ($groupKey === 'MTh/A.M.'): ?>
-                            <tr>
-                                <td class="col-center">7:00-7:30</td>
-                                <td colspan="6" class="special-row">Flag Raising Ceremony</td>
-                            </tr>
-                            <?php endif; ?>
-                            <?php foreach ($rows as $r): ?>
-                            <tr>
-                                <td class="col-center"><?php echo htmlspecialchars($format_schedule_time_label($r['start_time'], $r['end_time'])); ?></td>
-                                <td class="subject-code-cell"><?php echo htmlspecialchars($r['subject_code']); ?></td>
-                                <td class="description-cell"><?php echo htmlspecialchars($format_subject_description($r)); ?></td>
-                                <td class="col-center"><?php echo (int)($r['credits'] ?? 0); ?></td>
-                                <td class="col-center"><?php echo number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0), 2); ?></td>
-                                <td class="instructor-cell"><?php echo htmlspecialchars($r['instructor_name']); ?></td>
-                                <td class="col-center"><?php echo htmlspecialchars($r['room_number'] ?? ''); ?></td>
-                            </tr>
+                            <?php foreach ($time_slots as $time_slot_label): ?>
+                                <?php
+                                $slot_rows = ($groupKey === 'Saturday') ? ($rows ?? []) : ($rows_by_time[$time_slot_label] ?? []);
+                                $display_time_slot = ($groupKey === 'Saturday') ? '' : (string)$time_slot_label;
+                                $slotPairMultiplier = $get_effective_slot_multiplier((float)$sectionPairMultiplier, count($slot_rows));
+                                $forceDayLabel = (bool)preg_match('/^(MTh|TF)\//', (string)$groupKey);
+                                ?>
+                                <?php if ($time_slot_label === $break_time_label): ?>
+                                    <tr class="lunch-row">
+                                        <td class="col-center"><?php echo htmlspecialchars($display_time_slot); ?></td>
+                                        <td colspan="6">BREAK TIME</td>
+                                    </tr>
+                                <?php elseif (!empty($slot_rows)): ?>
+                                    <?php
+                                    // Group by subject type
+                                    $subj_by_type = [];
+                                    foreach ($slot_rows as $sr) {
+                                        $subjType = (string)($sr['subject_type'] ?? 'major');
+                                        if (!isset($subj_by_type[$subjType])) {
+                                            $subj_by_type[$subjType] = [];
+                                        }
+                                        $subj_by_type[$subjType][] = $sr;
+                                    }
+                                    $type_order = ['major', 'minor'];
+                                    ?>
+                                    <?php foreach ($type_order as $typeKey): ?>
+                                        <?php if (isset($subj_by_type[$typeKey])): ?>
+                                            <?php
+                                            $type_rows = $subj_by_type[$typeKey];
+                                            usort($type_rows, static function (array $a, array $b) use ($meeting_kind_rank): int {
+                                                $meetingCompare = $meeting_kind_rank($a) <=> $meeting_kind_rank($b);
+                                                if ($meetingCompare !== 0) {
+                                                    return $meetingCompare;
+                                                }
+                                                return strcmp((string)($a['subject_code'] ?? ''), (string)($b['subject_code'] ?? ''));
+                                            });
+                                            ?>
+                                            <?php foreach ($type_rows as $r): ?>
+                                            <?php $slotTimeLabel = $format_slot_label_with_day((string)$display_time_slot, $r, count($slot_rows), $forceDayLabel); ?>
+                                            <tr>
+                                                <td class="col-center"><?php echo htmlspecialchars($slotTimeLabel); ?></td>
+                                                <td class="subject-code-cell"><?php echo htmlspecialchars($r['subject_code'] ?? ''); ?></td>
+                                                <td class="description-cell"><?php echo htmlspecialchars($r ? $format_subject_description($r) : ''); ?></td>
+                                                <td class="col-center"><?php echo $r ? number_format($get_row_units($r) * $slotPairMultiplier, 2) : ''; ?></td>
+                                                <td class="col-center"><?php echo $r ? number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0) * $slotPairMultiplier, 2) : ''; ?></td>
+                                                <td class="instructor-cell"><?php echo htmlspecialchars($r['instructor_name'] ?? ''); ?></td>
+                                                <td class="col-center"><?php echo htmlspecialchars($r['room_number'] ?? ''); ?></td>
+                                            </tr>
+                                            <?php ?>
+                                            <?php endforeach; ?>
+                                        <?php endif; ?>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <tr>
+                                        <td class="col-center"><?php echo htmlspecialchars($display_time_slot); ?></td>
+                                        <td class="subject-code-cell"></td>
+                                        <td class="description-cell"></td>
+                                        <td class="col-center"></td>
+                                        <td class="col-center"></td>
+                                        <td class="instructor-cell"></td>
+                                        <td class="col-center"></td>
+                                    </tr>
+                                <?php endif; ?>
                             <?php endforeach; ?>
-                            <?php if (in_array($groupKey, ['MTh/A.M.', 'TF/A.M.', 'Wed/A.M.'], true) && !empty($section['by_day_group'][str_replace('A.M.', 'P.M.', $groupKey)])): ?>
-                            <tr class="lunch-row">
-                                <td colspan="7">Lunch Break</td>
-                            </tr>
-                            <?php endif; ?>
                             <?php endforeach; ?>
                             <tr class="section-total-row">
                                 <td colspan="3" style="text-align:right;">TOTAL UNITS</td>
@@ -1840,6 +2736,28 @@ if (isset($_GET['print'])) {
             if (departmentInput && programInput) {
                 departmentInput.addEventListener('input', syncProgramOptions);
                 syncProgramOptions();
+            }
+
+            const consultationTimeOptionsByGroup = <?php echo json_encode($consultation_time_options_by_group, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT); ?>;
+            const consultationDayGroupSelect = document.getElementById('consultation_day_group');
+            const consultationTimeLabelSelect = document.getElementById('consultation_time_label');
+            function syncConsultationTimeOptions() {
+                if (!consultationDayGroupSelect || !consultationTimeLabelSelect) {
+                    return;
+                }
+                const selectedGroup = consultationDayGroupSelect.value || '';
+                const options = consultationTimeOptionsByGroup[selectedGroup] || [];
+                consultationTimeLabelSelect.innerHTML = '';
+                options.forEach(label => {
+                    const opt = document.createElement('option');
+                    opt.value = label;
+                    opt.textContent = label;
+                    consultationTimeLabelSelect.appendChild(opt);
+                });
+            }
+            if (consultationDayGroupSelect && consultationTimeLabelSelect) {
+                consultationDayGroupSelect.addEventListener('change', syncConsultationTimeOptions);
+                syncConsultationTimeOptions();
             }
 
             <?php if (isset($print_mode)): ?>

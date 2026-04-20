@@ -1,0 +1,14 @@
+# Python cache/bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime logs
+logs/
+*.log
+*.out
+*.err
+
+# Local database backups/dumps
+sql/backups/
+*.sql.bak

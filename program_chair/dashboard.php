@@ -11,6 +11,94 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'program_chair') {
 $pdo = getDB();
 $user_id = $_SESSION['user_id'];
 
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS saved_schedule_backups (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            original_job_id INT NULL,
+            job_name VARCHAR(255) NOT NULL,
+            created_by INT NULL,
+            program_id INT NULL,
+            saved_by INT NOT NULL,
+            job_data LONGTEXT NOT NULL,
+            schedules_data LONGTEXT NOT NULL,
+            saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_saved_schedule_backup_job (original_job_id)
+        )
+    ");
+} catch (Exception $e) {
+    // Keep dashboard usable even if backup table creation is restricted.
+}
+
+function buildJobBackupPayload(PDO $pdo, int $jobId, int $programId): ?array {
+    $stmt = $pdo->prepare("SELECT * FROM schedule_jobs WHERE id = ? AND program_id = ?");
+    $stmt->execute([$jobId, $programId]);
+    $job = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$job) {
+        return null;
+    }
+
+    $stmt = $pdo->prepare("SELECT * FROM schedules WHERE job_id = ? ORDER BY id");
+    $stmt->execute([$jobId]);
+    $schedules = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    return [
+        'job' => $job,
+        'schedules' => $schedules,
+    ];
+}
+
+function restoreSavedBackup(PDO $pdo, array $backup, int $programId): ?int {
+    $jobData = json_decode((string)($backup['job_data'] ?? ''), true);
+    $schedulesData = json_decode((string)($backup['schedules_data'] ?? ''), true);
+    if (!is_array($jobData) || !is_array($schedulesData)) {
+        return null;
+    }
+    if ((int)($jobData['program_id'] ?? 0) !== $programId) {
+        return null;
+    }
+
+    $jobName = trim((string)($jobData['job_name'] ?? 'Restored Schedule'));
+    if ($jobName === '') {
+        $jobName = 'Restored Schedule';
+    }
+
+    $stmt = $pdo->prepare("
+        INSERT INTO schedule_jobs (job_name, status, created_by, program_id, input_data, completed_at, error_message, progress_percent, current_generation, total_generations, best_fitness)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+    $stmt->execute([
+        $jobName . ' (Restored)',
+        $jobData['status'] ?? 'completed',
+        $jobData['created_by'] ?? null,
+        $jobData['program_id'] ?? null,
+        $jobData['input_data'] ?? '{}',
+        $jobData['completed_at'] ?? null,
+        $jobData['error_message'] ?? null,
+        $jobData['progress_percent'] ?? 100,
+        $jobData['current_generation'] ?? 0,
+        $jobData['total_generations'] ?? 0,
+        $jobData['best_fitness'] ?? 0,
+    ]);
+    $newJobId = (int)$pdo->lastInsertId();
+
+    foreach ($schedulesData as $scheduleRow) {
+        if (!is_array($scheduleRow)) {
+            continue;
+        }
+        $scheduleRow['job_id'] = $newJobId;
+        unset($scheduleRow['id']);
+
+        $columns = array_keys($scheduleRow);
+        $placeholders = implode(',', array_fill(0, count($columns), '?'));
+        $sql = "INSERT INTO schedules (" . implode(',', $columns) . ") VALUES ($placeholders)";
+        $insert = $pdo->prepare($sql);
+        $insert->execute(array_values($scheduleRow));
+    }
+
+    return $newJobId;
+}
+
 // Get program chair's program info
 $stmt = $pdo->prepare("
     SELECT pc.*, p.program_name 
@@ -70,9 +158,48 @@ $stmt = $pdo->prepare("
 ");
 $stmt->execute([$program_id]);
 $recentJobs = $stmt->fetchAll();
+$stmt = $pdo->prepare("
+    SELECT * FROM saved_schedule_backups
+    WHERE program_id = ?
+    ORDER BY saved_at DESC
+    LIMIT 5
+");
+$stmt->execute([$program_id]);
+$savedBackups = $stmt->fetchAll();
 
 // Handle delete job
 $delete_message = '';
+if (isset($_GET['save_job'])) {
+    $job_id = (int) $_GET['save_job'];
+    if ($job_id > 0) {
+        $payload = buildJobBackupPayload($pdo, $job_id, (int)$program_id);
+        if ($payload !== null) {
+            $stmt = $pdo->prepare("
+                INSERT INTO saved_schedule_backups (original_job_id, job_name, created_by, program_id, saved_by, job_data, schedules_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    job_name = VALUES(job_name),
+                    created_by = VALUES(created_by),
+                    program_id = VALUES(program_id),
+                    saved_by = VALUES(saved_by),
+                    job_data = VALUES(job_data),
+                    schedules_data = VALUES(schedules_data),
+                    saved_at = CURRENT_TIMESTAMP
+            ");
+            $stmt->execute([
+                $payload['job']['id'],
+                $payload['job']['job_name'],
+                $payload['job']['created_by'] ?? null,
+                $payload['job']['program_id'] ?? null,
+                $_SESSION['user_id'],
+                json_encode($payload['job']),
+                json_encode($payload['schedules']),
+            ]);
+            header('Location: dashboard.php?saved=1');
+            exit;
+        }
+    }
+}
 if (isset($_GET['delete_job'])) {
     $job_id = (int) $_GET['delete_job'];
     if ($job_id > 0) {
@@ -85,6 +212,36 @@ if (isset($_GET['delete_job'])) {
 }
 if (isset($_GET['deleted'])) {
     $delete_message = 'Job and its schedules have been deleted.';
+} elseif (isset($_GET['saved'])) {
+    $delete_message = 'Schedule backup saved successfully.';
+} elseif (isset($_GET['restored'])) {
+    $delete_message = 'Saved schedule restored successfully.';
+}
+
+if (isset($_GET['restore_saved'])) {
+    $backup_id = (int) $_GET['restore_saved'];
+    if ($backup_id > 0) {
+        $stmt = $pdo->prepare("SELECT * FROM saved_schedule_backups WHERE id = ? AND program_id = ?");
+        $stmt->execute([$backup_id, $program_id]);
+        $backup = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($backup) {
+            $newJobId = restoreSavedBackup($pdo, $backup, (int)$program_id);
+            if ($newJobId) {
+                header('Location: dashboard.php?restored=1');
+                exit;
+            }
+        }
+    }
+}
+
+if (isset($_GET['delete_saved'])) {
+    $backup_id = (int) $_GET['delete_saved'];
+    if ($backup_id > 0) {
+        $stmt = $pdo->prepare("DELETE FROM saved_schedule_backups WHERE id = ? AND program_id = ?");
+        $stmt->execute([$backup_id, $program_id]);
+        header('Location: dashboard.php?deleted=1');
+        exit;
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -185,7 +342,37 @@ if (isset($_GET['deleted'])) {
                             <td><?php echo date('M j, Y g:i A', strtotime($job['created_at'])); ?></td>
                             <td>
                                 <a href="view_schedule.php?job_id=<?php echo $job['id']; ?>" class="btn-small">View</a>
+                                <a href="dashboard.php?save_job=<?php echo $job['id']; ?>" class="btn-small" onclick="return confirm('Save a recoverable backup of this schedule job?');">Save</a>
                                 <a href="dashboard.php?delete_job=<?php echo $job['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this job and all its generated schedules?');">Delete</a>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
+
+        <div class="recent-jobs">
+            <h2>Saved Schedule Backups</h2>
+            <?php if (empty($savedBackups)): ?>
+                <p class="no-data">No saved schedule backups yet.</p>
+            <?php else: ?>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Job Name</th>
+                            <th>Saved At</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($savedBackups as $backup): ?>
+                        <tr>
+                            <td><?php echo htmlspecialchars($backup['job_name']); ?></td>
+                            <td><?php echo date('M j, Y g:i A', strtotime((string)$backup['saved_at'])); ?></td>
+                            <td>
+                                <a href="dashboard.php?restore_saved=<?php echo (int)$backup['id']; ?>" class="btn-small" onclick="return confirm('Restore this saved schedule as a new job?');">Restore</a>
+                                <a href="dashboard.php?delete_saved=<?php echo (int)$backup['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this saved backup permanently?');">Delete</a>
                             </td>
                         </tr>
                         <?php endforeach; ?>

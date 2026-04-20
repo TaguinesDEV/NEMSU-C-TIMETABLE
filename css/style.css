@@ -1289,6 +1289,30 @@ max-width:90%;
     transform:scale(1.2);
 }
 
+.schedule-form .inline-checkbox-row{
+    display:flex;
+    flex-direction:row;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:24px;
+}
+
+.schedule-form .inline-checkbox{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    margin:0;
+    font-size:16px;
+    font-weight:500;
+    cursor:pointer;
+}
+
+.schedule-form .inline-checkbox input[type="checkbox"]{
+    width:auto;
+    margin:0;
+    transform:none;
+}
+
 /* button area */
 
 .schedule-form .form-actions{
@@ -1649,6 +1673,10 @@ display:flex;
 flex-direction:column;
 }
 
+.modal-content .form-group.full-width {
+grid-column: 1 / -1;
+}
+
 /* labels */
 
 .modal-content label{
@@ -1690,8 +1718,18 @@ margin-top:10px;
 /* modal box */
 
 .modal-content{
-width:720px;
-max-width:95%;
+width:900px;
+max-width:98%;
+}
+
+@media (max-width: 960px) {
+    .modal-content {
+        width: 95%;
+    }
+    .modal-content form {
+        grid-template-columns: 1fr;
+    }
+}
 padding:35px 40px;
 display:flex;
 flex-direction:column;

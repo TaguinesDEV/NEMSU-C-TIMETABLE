@@ -8,7 +8,9 @@ This project combines:
 
 - `PHP` for the web application (admin, program chair, instructor portals)
 - `MySQL` for data storage
-- `Python` for GA-based schedule generation (`python_ga/genetic_algorithm.py`)
+- `Python` for schedule generation:
+  - CP-SAT (OR-Tools) for fast feasibility (`python_solver/run_solver.py` + `python_solver/cpsat_engine.py`)
+  - GA fallback (`python_ga/genetic_algorithm.py`)
 
 Generated schedules are stored in the database and can be reviewed/published from the admin/program chair interfaces.
 
@@ -27,18 +29,65 @@ Generated schedules are stored in the database and can be reviewed/published fro
 
 ```text
 academic-scheduling/
-|- index.php
-|- config/
-|  `- database.php
-|- includes/
-|- admin/
-|- program_chair/
-|- instructor/
-|- python_ga/
-|  |- genetic_algorithm.py
-|  `- requirements.txt
-`- sql/
+├── index.php                      # Main login page
+├── logout.php                     # Logout handler
+├── config/
+│   ├── database.php              # DB connection config
+│   └── report_signatories.json   # Report configuration
+├── includes/                      # Shared PHP included files
+│   ├── auth.php
+│   ├── header.php
+│   └── footer.php
+├── admin/                         # Admin portal
+│   ├── dashboard.php
+│   ├── manage_subjects.php
+│   ├── manage_instructors.php
+│   ├── manage_rooms.php
+│   ├── manage_time_slots.php
+│   └── ...
+├── program_chair/                 # Program coordinator portal
+│   ├── dashboard.php
+│   ├── generate_schedule.php
+│   └── view_schedule.php
+├── instructor/                    # Instructor dashboard
+│   └── dashboard.php
+├── assets/                        # Static assets
+│   ├── css/
+│   ├── js/
+│   └── images/
+│
+├── python_ga/                     # Genetic Algorithm Solver
+│   ├── genetic_algorithm.py       # Main GA implementation (core)
+│   └── requirements.txt
+│
+├── python_solver/                 # Adaptive Solver Pipeline (Optimized v2.0)
+│   ├── run_solver.py             # Main orchestrator (entry point)
+│   ├── preprocessing.py           # Problem complexity analysis
+│   ├── simulated_annealing.py    # SA optimizer
+│   ├── cpsat_engine.py           # CP-SAT solver (if OR-Tools available)
+│   └── requirements.txt
+│
+├── sql/                          # Database schemas
+│   ├── academic_scheduling.sql   # Main schema
+│   └── backups/                  # Database backups
+│
+├── scripts/                      # Utility scripts
+│
+├── OPTIMIZATION_GUIDE.md         # Technical optimization documentation
+├── DEPLOYMENT_GUIDE.md           # Deployment instructions
+└── CLEANUP_PLAN.md              # (Internal cleanup tracking)
 ```
+
+## Quick File Reference
+
+| File | Purpose |
+|---|---|
+| **python_solver/run_solver.py** | Main entry point for schedule generation - intelligent router |
+| **python_ga/genetic_algorithm.py** | Core genetic algorithm solver |
+| **python_solver/preprocessing.py** | Problem analysis & complexity scoring |
+| **python_solver/simulated_annealing.py** | Quality optimization post-solver |
+| **OPTIMIZATION_GUIDE.md** | Technical documentation of optimization pipeline |
+| **DEPLOYMENT_GUIDE.md** | Instructions for deployment & monitoring
 
 ## Requirements
 
@@ -57,10 +106,13 @@ academic-scheduling/
 5. Configure DB/Python paths in `config/database.php` if needed:
    - `DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`
    - `PYTHON_PATH` (for Windows typically `python`)
-6. Install Python dependencies:
+6. Install Python dependencies (GA fallback):
    - `cd python_ga`
    - `pip install -r requirements.txt`
-7. Open the app:
+7. (Recommended) Install CP-SAT dependencies for faster generation:
+   - `cd python_solver`
+   - `pip install -r requirements.txt`
+8. Open the app:
    - `http://localhost/academic-scheduling/`
 
 ## Default Credentials
@@ -80,9 +132,10 @@ Change these immediately in non-local environments.
    - `admin/generate_schedule.php` or
    - `program_chair/generate_schedule.php`
 2. Job input (instructors, rooms, subjects, constraints) is saved to `schedule_jobs.input_data`.
-3. PHP starts Python GA in background with job ID.
-4. Python GA reads job input, enforces constraints, and writes generated entries to `schedules`.
-5. Status is updated in `schedule_jobs`.
+3. PHP starts the Python scheduler in background with job ID.
+4. The Python scheduler tries CP-SAT first (fast feasibility) and writes generated entries to `schedules`.
+5. If CP-SAT is not installed or cannot solve the job quickly (or mirror/paired-day mode is enabled), it falls back to the GA engine.
+6. Status is updated in `schedule_jobs`.
 
 ## Notes
 
