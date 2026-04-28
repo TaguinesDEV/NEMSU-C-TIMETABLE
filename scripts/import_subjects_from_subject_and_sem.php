@@ -6,13 +6,14 @@ $root = dirname(__DIR__);
 $sourceFile = $root . DIRECTORY_SEPARATOR . 'subject and sem.sql';
 $replaceAllSubjects = in_array('--replace-all', $argv ?? [], true);
 
+require_once $root . DIRECTORY_SEPARATOR . 'config' . DIRECTORY_SEPARATOR . 'database.php';
+
 if (!is_file($sourceFile)) {
     fwrite(STDERR, "Source file not found: {$sourceFile}\n");
     exit(1);
 }
 
-$pdo = new PDO('mysql:host=localhost;dbname=academic_scheduling;charset=utf8mb4', 'root', '');
-$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$pdo = getDB();
 
 function ensurePrograms(PDO $pdo): array
 {

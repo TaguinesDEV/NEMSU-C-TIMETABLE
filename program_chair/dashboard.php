@@ -10,6 +10,27 @@ if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'program_chair') {
 
 $pdo = getDB();
 $user_id = $_SESSION['user_id'];
+$dashboardPreviewLimit = 5;
+$dashboardTransientParams = ['save_job', 'delete_job', 'restore_saved', 'delete_saved', 'saved', 'deleted', 'restored'];
+
+function buildDashboardUrl(array $overrides = [], array $exclude = []): string {
+    $params = $_GET;
+
+    foreach ($exclude as $key) {
+        unset($params[$key]);
+    }
+
+    foreach ($overrides as $key => $value) {
+        if ($value === null || $value === false || $value === '') {
+            unset($params[$key]);
+            continue;
+        }
+        $params[$key] = $value;
+    }
+
+    $query = http_build_query($params);
+    return 'dashboard.php' . ($query !== '' ? '?' . $query : '');
+}
 
 try {
     $pdo->exec("
@@ -151,21 +172,23 @@ $stats = [
 
 // Get recent jobs for this program
 $stmt = $pdo->prepare("
-    SELECT * FROM schedule_jobs 
+    SELECT *
+    FROM schedule_jobs
     WHERE program_id = ?
-    ORDER BY created_at DESC 
-    LIMIT 5
+    ORDER BY created_at DESC
 ");
 $stmt->execute([$program_id]);
 $recentJobs = $stmt->fetchAll();
+$jobCount = count($recentJobs);
+
 $stmt = $pdo->prepare("
     SELECT * FROM saved_schedule_backups
     WHERE program_id = ?
     ORDER BY saved_at DESC
-    LIMIT 5
 ");
 $stmt->execute([$program_id]);
 $savedBackups = $stmt->fetchAll();
+$backupCount = count($savedBackups);
 
 // Handle delete job
 $delete_message = '';
@@ -195,7 +218,7 @@ if (isset($_GET['save_job'])) {
                 json_encode($payload['job']),
                 json_encode($payload['schedules']),
             ]);
-            header('Location: dashboard.php?saved=1');
+            header('Location: ' . buildDashboardUrl(['saved' => 1], $dashboardTransientParams));
             exit;
         }
     }
@@ -206,7 +229,7 @@ if (isset($_GET['delete_job'])) {
         $stmt = $pdo->prepare("DELETE FROM schedule_jobs WHERE id = ? AND program_id = ?");
         $stmt->execute([$job_id, $program_id]);
         $delete_message = $stmt->rowCount() ? 'Job and its schedules deleted.' : '';
-        header('Location: dashboard.php?deleted=1');
+        header('Location: ' . buildDashboardUrl(['deleted' => 1], $dashboardTransientParams));
         exit;
     }
 }
@@ -227,7 +250,7 @@ if (isset($_GET['restore_saved'])) {
         if ($backup) {
             $newJobId = restoreSavedBackup($pdo, $backup, (int)$program_id);
             if ($newJobId) {
-                header('Location: dashboard.php?restored=1');
+                header('Location: ' . buildDashboardUrl(['restored' => 1], $dashboardTransientParams));
                 exit;
             }
         }
@@ -239,7 +262,7 @@ if (isset($_GET['delete_saved'])) {
     if ($backup_id > 0) {
         $stmt = $pdo->prepare("DELETE FROM saved_schedule_backups WHERE id = ? AND program_id = ?");
         $stmt->execute([$backup_id, $program_id]);
-        header('Location: dashboard.php?deleted=1');
+        header('Location: ' . buildDashboardUrl(['deleted' => 1], $dashboardTransientParams));
         exit;
     }
 }
@@ -317,69 +340,129 @@ if (isset($_GET['delete_saved'])) {
         </div>
         
         <div class="recent-jobs">
-            <h2>Recent Schedule Generation Jobs</h2>
+            <div class="dashboard-section-header">
+                <h2>Recent Schedule Generation Jobs</h2>
+            </div>
             <?php if (empty($recentJobs)): ?>
                 <p class="no-data">No schedule jobs yet. Click "Generate Schedule" to create one.</p>
             <?php else: ?>
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Job Name</th>
-                            <th>Status</th>
-                            <th>Created</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($recentJobs as $job): ?>
-                        <tr>
-                            <td><?php echo htmlspecialchars($job['job_name']); ?></td>
-                            <td>
-                                <span class="status-badge status-<?php echo $job['status']; ?>">
-                                    <?php echo $job['status']; ?>
-                                </span>
-                            </td>
-                            <td><?php echo date('M j, Y g:i A', strtotime($job['created_at'])); ?></td>
-                            <td>
-                                <a href="view_schedule.php?job_id=<?php echo $job['id']; ?>" class="btn-small">View</a>
-                                <a href="dashboard.php?save_job=<?php echo $job['id']; ?>" class="btn-small" onclick="return confirm('Save a recoverable backup of this schedule job?');">Save</a>
-                                <a href="dashboard.php?delete_job=<?php echo $job['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this job and all its generated schedules?');">Delete</a>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
+                <div class="dashboard-table-panel" data-preview-rows="<?php echo $dashboardPreviewLimit; ?>">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Job Name</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($recentJobs as $index => $job): ?>
+                            <tr<?php echo $index >= $dashboardPreviewLimit ? ' hidden' : ''; ?>>
+                                <td><?php echo htmlspecialchars($job['job_name']); ?></td>
+                                <td>
+                                    <span class="status-badge status-<?php echo $job['status']; ?>">
+                                        <?php echo $job['status']; ?>
+                                    </span>
+                                </td>
+                                <td><?php echo date('M j, Y g:i A', strtotime($job['created_at'])); ?></td>
+                                <td>
+                                    <a href="view_schedule.php?job_id=<?php echo $job['id']; ?>" class="btn-small">View</a>
+                                    <a href="<?php echo htmlspecialchars(buildDashboardUrl(['save_job' => $job['id']], $dashboardTransientParams)); ?>" class="btn-small" onclick="return confirm('Save a recoverable backup of this schedule job?');">Save</a>
+                                    <a href="<?php echo htmlspecialchars(buildDashboardUrl(['delete_job' => $job['id']], $dashboardTransientParams)); ?>" class="btn-small btn-danger" onclick="return confirm('Delete this job and all its generated schedules?');">Delete</a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if ($jobCount > $dashboardPreviewLimit): ?>
+                    <div class="dashboard-table-footer" data-toggle-panel>
+                        <p class="dashboard-section-meta">
+                            Showing <span data-preview-count><?php echo min($dashboardPreviewLimit, $jobCount); ?></span> of <?php echo $jobCount; ?> jobs
+                        </p>
+                        <button type="button" class="dashboard-toggle-btn" aria-expanded="false">See All</button>
+                    </div>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
 
         <div class="recent-jobs">
-            <h2>Saved Schedule Backups</h2>
+            <div class="dashboard-section-header">
+                <h2>Saved Schedule Backups</h2>
+            </div>
             <?php if (empty($savedBackups)): ?>
                 <p class="no-data">No saved schedule backups yet.</p>
             <?php else: ?>
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Job Name</th>
-                            <th>Saved At</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($savedBackups as $backup): ?>
-                        <tr>
-                            <td><?php echo htmlspecialchars($backup['job_name']); ?></td>
-                            <td><?php echo date('M j, Y g:i A', strtotime((string)$backup['saved_at'])); ?></td>
-                            <td>
-                                <a href="dashboard.php?restore_saved=<?php echo (int)$backup['id']; ?>" class="btn-small" onclick="return confirm('Restore this saved schedule as a new job?');">Restore</a>
-                                <a href="dashboard.php?delete_saved=<?php echo (int)$backup['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this saved backup permanently?');">Delete</a>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
+                <div class="dashboard-table-panel" data-preview-rows="<?php echo $dashboardPreviewLimit; ?>">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Job Name</th>
+                                <th>Saved At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($savedBackups as $index => $backup): ?>
+                            <tr<?php echo $index >= $dashboardPreviewLimit ? ' hidden' : ''; ?>>
+                                <td><?php echo htmlspecialchars($backup['job_name']); ?></td>
+                                <td><?php echo date('M j, Y g:i A', strtotime((string)$backup['saved_at'])); ?></td>
+                                <td>
+                                    <a href="<?php echo htmlspecialchars(buildDashboardUrl(['restore_saved' => (int)$backup['id']], $dashboardTransientParams)); ?>" class="btn-small" onclick="return confirm('Restore this saved schedule as a new job?');">Restore</a>
+                                    <a href="<?php echo htmlspecialchars(buildDashboardUrl(['delete_saved' => (int)$backup['id']], $dashboardTransientParams)); ?>" class="btn-small btn-danger" onclick="return confirm('Delete this saved backup permanently?');">Delete</a>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if ($backupCount > $dashboardPreviewLimit): ?>
+                    <div class="dashboard-table-footer" data-toggle-panel>
+                        <p class="dashboard-section-meta">
+                            Showing <span data-preview-count><?php echo min($dashboardPreviewLimit, $backupCount); ?></span> of <?php echo $backupCount; ?> backups
+                        </p>
+                        <button type="button" class="dashboard-toggle-btn" aria-expanded="false">See All</button>
+                    </div>
+                <?php endif; ?>
             <?php endif; ?>
         </div>
     </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        document.querySelectorAll('.recent-jobs').forEach(function (section) {
+            const footer = section.querySelector('[data-toggle-panel]');
+            const button = footer ? footer.querySelector('.dashboard-toggle-btn') : null;
+            const previewCount = footer ? footer.querySelector('[data-preview-count]') : null;
+            const table = section.querySelector('.dashboard-table-panel table');
+            const rows = table ? Array.from(table.querySelectorAll('tbody tr')) : [];
+            const previewRows = parseInt(section.querySelector('.dashboard-table-panel')?.getAttribute('data-preview-rows') || '5', 10);
+
+            if (!button || rows.length <= previewRows) {
+                return;
+            }
+
+            function setExpanded(expand) {
+                section.classList.toggle('is-expanded', expand);
+                button.textContent = expand ? 'Show Less' : 'See All';
+                button.setAttribute('aria-expanded', expand ? 'true' : 'false');
+
+                rows.forEach(function (row, index) {
+                    row.hidden = !expand && index >= previewRows;
+                });
+
+                if (previewCount) {
+                    previewCount.textContent = expand ? rows.length : Math.min(previewRows, rows.length);
+                }
+            }
+
+            button.addEventListener('click', function () {
+                setExpanded(!section.classList.contains('is-expanded'));
+            });
+
+            setExpanded(false);
+        });
+    });
+    </script>
 </body>
 </html>

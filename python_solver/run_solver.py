@@ -80,6 +80,13 @@ def main():
     solver_category = analysis['solver_category']
     recommendations = analysis['recommendations']
 
+    # Paired-day jobs rely on the GA's anchor-first mirroring and room-repair
+    # logic. Keep them on the GA path so behavior is consistent regardless of
+    # problem size.
+    if bool(getattr(ga, "four_day_pattern", False)):
+        solver_category = "ga-only"
+        print("\nPaired-day mode detected - forcing GA path so anchor mirroring stays consistent.\n")
+
     print(f"\n🎯 Solver strategy: {solver_category.upper()}\n")
 
     start_time = time.time()
@@ -107,6 +114,30 @@ def main():
         return _solve_huge(ga, recommendations, start_time)
 
 
+def _apply_ga_recommendations(ga, recs):
+    """Apply analyzer-tuned GA settings to the active GA instance."""
+    if not isinstance(recs, dict):
+        return
+
+    try:
+        population = int(recs.get('ga_population', ga.population_size))
+        ga.population_size = max(20, min(400, population))
+    except Exception:
+        pass
+
+    try:
+        generations = int(recs.get('ga_generations', ga.generations))
+        ga.generations = max(50, min(1000, generations))
+    except Exception:
+        pass
+
+    try:
+        max_runtime = int(recs.get('ga_timeout', ga.max_runtime_seconds))
+        ga.max_runtime_seconds = max(0, min(1800, max_runtime))
+    except Exception:
+        pass
+
+
 def _solve_tiny(ga, recs, start_time):
     """Solve TINY problems with CSP only (< 5 seconds)."""
     print("⚡ TINY problem detected - using fast CSP solver only\n")
@@ -131,7 +162,7 @@ def _solve_tiny(ga, recs, start_time):
         return 0
     
     except Exception as e:
-        _mark_job_failed(job_id, str(e))
+        _mark_job_failed(getattr(ga, "job_id", None), str(e))
         print(f"❌ TINY solver failed: {e}")
         ga.update_job_status("failed", str(e))
         return 1
@@ -195,6 +226,7 @@ def _solve_medium(ga, recs, start_time):
     print("⚡ MEDIUM problem detected - using Genetic Algorithm\n")
     
     try:
+        _apply_ga_recommendations(ga, recs)
         ga.update_progress(20)
         print(f"  Genetic Algorithm (pop={recs['ga_population']}, gen={recs['ga_generations']})...\n")
         
@@ -258,6 +290,7 @@ def _solve_large(ga, recs, start_time):
         pass
     
     # Fallback to GA
+    _apply_ga_recommendations(ga, recs)
     print(f"  Phase 2: Genetic Algorithm (pop={recs['ga_population']}, gen={recs['ga_generations']})...\n")
     ga.update_progress(30)
     result = ga.run()
@@ -268,6 +301,7 @@ def _solve_huge(ga, recs, start_time):
     """Solve HUGE problems with aggressive GA (1-10 minutes)."""
     print("⚡ HUGE problem detected - using genetic algorithm\n")
     
+    _apply_ga_recommendations(ga, recs)
     ga.update_progress(10)
     result = ga.run()
     return 0 if result else 1

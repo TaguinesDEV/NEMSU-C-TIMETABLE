@@ -16,6 +16,9 @@ if ($subject) {
 
     $yearLevel = (int)($subject['year_level'] ?? 1);
     $subject['year_level'] = ($yearLevel >= 1 && $yearLevel <= 5) ? $yearLevel : 1;
+
+    $subject['preferred_start_time'] = !empty($subject['preferred_start_time']) ? substr($subject['preferred_start_time'], 0, 5) : null;
+    $subject['preferred_end_time'] = !empty($subject['preferred_end_time']) ? substr($subject['preferred_end_time'], 0, 5) : null;
 }
 
 header('Content-Type: application/json');

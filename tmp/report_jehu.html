@@ -1,0 +1,1799 @@
+
+Notice: session_start(): Ignoring session_start() because a session is already active in C:\xampp\htdocs\academic-scheduling\config\database.php on line 76
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Schedule Reports - Academic Scheduling System</title>
+    <link rel="stylesheet" href="../css/style.css">
+    <style>
+        .schedule-section-block {
+            border: 1px solid #000;
+            margin-bottom: 2rem;
+            background: #fff;
+            page-break-inside: avoid;
+        }
+        .schedule-section-header {
+            padding: 10px 14px;
+            border-bottom: 1px solid #000;
+            font-weight: 700;
+            font-size: 15px;
+        }
+        .schedule-report-table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: fixed;
+            margin-bottom: 0;
+            font-size: 13px;
+        }
+        .schedule-report-table th,
+        .schedule-report-table td {
+            border: 1px solid #000;
+            padding: 6px 7px;
+            vertical-align: middle;
+        }
+        .schedule-report-table thead th {
+            background: #f5f5f5;
+            text-align: center;
+            font-weight: 700;
+        }
+        .schedule-report-table .col-time { width: 12%; }
+        .schedule-report-table .col-code { width: 10%; }
+        .schedule-report-table .col-description { width: 34%; }
+        .schedule-report-table .col-units { width: 8%; }
+        .schedule-report-table .col-hours { width: 8%; }
+        .schedule-report-table .col-instructor { width: 18%; }
+        .schedule-report-table .col-room { width: 10%; }
+        .schedule-report-table td.col-center,
+        .schedule-report-table th.col-center {
+            text-align: center;
+        }
+        .schedule-report-table .day-group-header td {
+            background: #fff;
+            font-weight: 700;
+            font-size: 19px;
+            padding: 4px 8px;
+        }
+        .schedule-report-table .day-group-header td:first-child {
+            text-align: left;
+        }
+        .schedule-report-table .day-group-header td:not(:first-child) {
+            background: #fff;
+        }
+        .schedule-report-table .special-row,
+        .schedule-report-table .special-row td {
+            text-align: center;
+            font-weight: 700;
+            background: #fff;
+        }
+        .schedule-report-table .lunch-row td {
+            text-align: center;
+            font-weight: 700;
+            background: #fff;
+            padding: 3px 8px;
+        }
+        .schedule-report-table .subject-code-cell {
+            background: #fff;
+            font-weight: 700;
+            text-align: center;
+        }
+        .schedule-report-table .instructor-cell {
+            text-align: center;
+        }
+        .schedule-report-table .description-cell {
+            text-align: center;
+            line-height: 1.25;
+        }
+        .schedule-report-table .section-total-row td {
+            font-weight: 700;
+            background: #fafafa;
+        }
+        .workload-sheet {
+            border: 1px solid #333;
+            padding: 18px 18px 14px;
+            page-break-inside: avoid;
+        }
+        .workload-report-group {
+            display: grid;
+            gap: 16px;
+        }
+        .workload-sheet-supplemental {
+            margin-top: 4px;
+        }
+        .workload-header {
+            text-align: center;
+            margin-bottom: 12px;
+            line-height: 1.35;
+        }
+        .report-main-header {
+            text-align: center;
+            margin-bottom: 18px;
+            line-height: 1.15;
+        }
+        .report-main-header img {
+            width: 76px;
+            height: auto;
+            margin-bottom: 6px;
+        }
+        .report-main-header .country-line {
+            font-size: 15px;
+        }
+        .report-main-header .university-line {
+            font-size: 22px;
+            font-weight: 700;
+        }
+        .report-main-header .department-line {
+            font-size: 20px;
+            font-weight: 700;
+            color: #2f4a68;
+        }
+        .report-main-header .title-line {
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+        }
+        .report-main-header .term-line {
+            font-size: 15px;
+            font-style: italic;
+        }
+        .workload-header h2, .workload-header h3, .workload-header h4 {
+            margin: 2px 0;
+        }
+        .workload-meta {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px 16px;
+            margin-bottom: 14px;
+            font-size: 14px;
+        }
+        .workload-meta .meta-line {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            align-items: baseline;
+        }
+        .workload-meta .meta-label {
+            font-weight: 700;
+        }
+        .workload-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .workload-table th,
+        .workload-table td {
+            border: 1px solid #333;
+            padding: 6px;
+            vertical-align: top;
+        }
+        .workload-table thead th {
+            background: #f2f2f2;
+        }
+        .workload-group td {
+            background: #fafafa;
+            font-weight: 600;
+        }
+        .workload-table .blank-row td {
+            height: 28px;
+        }
+        .workload-summary {
+            margin-top: 12px;
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .workload-summary td {
+            border: 1px solid #333;
+            padding: 6px;
+        }
+        .workload-summary .summary-label {
+            font-weight: 700;
+            width: 28%;
+        }
+        .faculty-signatures {
+            margin-top: 26px;
+            page-break-inside: avoid;
+        }
+        .faculty-signatures.instructor-signatures {
+            margin-top: 16px;
+        }
+        .faculty-signature-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 42px;
+            margin-top: 28px;
+        }
+        .faculty-signature-row.single {
+            grid-template-columns: 1fr;
+            max-width: 420px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .faculty-signature-block {
+            text-align: center;
+        }
+        .faculty-signature-label {
+            text-align: left;
+            font-weight: 700;
+            margin-bottom: 30px;
+        }
+        .faculty-signature-label-centered {
+            text-align: center;
+        }
+        .faculty-signature-row-label {
+            margin-top: 22px;
+            margin-bottom: 8px;
+            font-weight: 700;
+            text-align: left;
+        }
+        .instructor-signatures .faculty-signature-row {
+            margin-top: 14px;
+        }
+        .instructor-signatures .faculty-signature-name {
+            border-top: none;
+            min-width: 300px;
+            padding-top: 0;
+        }
+        .instructor-signatures .faculty-signature-label {
+            margin-bottom: 12px;
+        }
+        .faculty-signature-name {
+            font-weight: 700;
+            text-transform: uppercase;
+            border-top: 1px solid #222;
+            display: inline-block;
+            min-width: 280px;
+            padding-top: 6px;
+        }
+        .faculty-signature-title {
+            margin-top: 4px;
+        }
+        .report-signatory-settings {
+            margin-top: 24px;
+            padding: 16px;
+            border: 1px solid #d0d7de;
+            border-radius: 8px;
+            background: #f8fafc;
+        }
+        .report-signatory-settings h3 {
+            margin-top: 0;
+        }
+        .report-signatory-settings .form-hint {
+            margin-top: -4px;
+            margin-bottom: 14px;
+            color: #475569;
+            font-size: 13px;
+        }
+        .conflict-summary {
+            margin: 16px 0 20px;
+            border: 1px solid #d0d7de;
+            border-radius: 10px;
+            padding: 16px;
+            background: #fff;
+        }
+        .conflict-summary.is-clear {
+            border-color: #b7ebc6;
+            background: #f0fff4;
+        }
+        .conflict-summary.is-warning {
+            border-color: #f3c7a7;
+            background: #fff7ed;
+        }
+        .conflict-summary-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: flex-start;
+            margin-bottom: 14px;
+        }
+        .conflict-summary-header h3 {
+            margin: 0 0 6px;
+        }
+        .conflict-summary-status {
+            font-weight: 700;
+            padding: 6px 10px;
+            border-radius: 999px;
+            white-space: nowrap;
+        }
+        .conflict-summary.is-clear .conflict-summary-status {
+            color: #166534;
+            background: #dcfce7;
+        }
+        .conflict-summary.is-warning .conflict-summary-status {
+            color: #9a3412;
+            background: #ffedd5;
+        }
+        .conflict-summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .conflict-summary-card {
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            background: #fff;
+            padding: 12px;
+        }
+        .conflict-summary-card strong {
+            display: block;
+            font-size: 22px;
+            margin-bottom: 4px;
+        }
+        .conflict-summary-card span {
+            color: #475569;
+            font-size: 13px;
+        }
+        .conflict-summary-details {
+            margin: 0;
+            padding-left: 18px;
+        }
+        .conflict-summary-note {
+            margin-top: 10px;
+            color: #475569;
+            font-size: 13px;
+        }
+        .signatory-settings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 12px 16px;
+        }
+        .signatory-settings-grid label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .signatory-settings-grid input {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+        .logo-setting {
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background: #fff;
+        }
+        .logo-setting-preview {
+            min-height: 72px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 10px;
+            border: 1px dashed #cbd5e1;
+            border-radius: 6px;
+            background: #f8fafc;
+        }
+        .logo-setting-preview img {
+            max-width: 100%;
+            max-height: 56px;
+            object-fit: contain;
+        }
+        .logo-setting-preview span {
+            color: #64748b;
+            font-size: 13px;
+        }
+        .logo-setting-upload {
+            margin-top: 10px;
+        }
+        .report-signature-sheet {
+            margin-top: 28px;
+            border: none;
+            padding: 18px 0 0;
+            page-break-inside: avoid;
+        }
+        .report-signature-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-bottom: 18px;
+        }
+        .report-signature-grid.single {
+            grid-template-columns: 1fr;
+            text-align: center;
+        }
+        .signature-label {
+            font-size: 14px;
+            margin-bottom: 28px;
+        }
+        .signature-name {
+            font-weight: 700;
+            font-size: 20px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .signature-title {
+            font-size: 14px;
+        }
+        .report-signature-meta {
+            margin-top: 22px;
+            text-align: center;
+            font-size: 13px;
+            color: #0f766e;
+            font-style: italic;
+        }
+        .report-contact-footer {
+            margin-top: 20px;
+            padding-top: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            gap: 16px;
+        }
+        .report-contact-lines div {
+            margin-bottom: 4px;
+        }
+        .report-contact-lines a {
+            color: #1d4ed8;
+            text-decoration: underline;
+        }
+        .report-contact-logo img {
+            width: 68px;
+            height: auto;
+        }
+        .report-contact-logos {
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .report-contact-logos img {
+            width: 58px;
+            height: auto;
+            object-fit: contain;
+        }
+
+        /* Per-block print buttons (screen only) */
+        .block-print-container {
+            position: relative;
+            margin-bottom: 16px;
+        }
+.block-print-btn {
+            position: absolute;
+            top: 12px;
+            right: 16px;
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 14px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+            transition: all 0.2s ease;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .block-print-btn:hover {
+            transform: scale(1.08);
+            box-shadow: 0 6px 20px rgba(59, 130, 246, 0.6);
+        }
+        body.printing-block .no-print {
+            display: none !important;
+        }
+        @media print {
+            @page {
+                size: Letter portrait;
+                margin: 0.2in;
+            }
+            html,
+            body.report-page {
+                width: auto;
+                min-height: auto;
+                margin: 0;
+                padding: 0;
+                font-size: 9px;
+                background: #fff;
+            }
+            body.report-page .container {
+                width: 100%;
+                max-width: 8.1in;
+                margin: 0 auto;
+                padding: 0;
+            }
+            .block-print-btn {
+                display: none !important;
+            }
+            .no-print {
+                display: none !important;
+            }
+            body.printing-block .schedule-section-block:not(.printing),
+            body.printing-block .workload-sheet:not(.printing) {
+                display: none !important;
+            }
+            body.printing-block .header,
+            body.printing-block .filter-section,
+            body.printing-block .container > *:not(.printing),
+            body.printing-block .report-signatory-settings {
+                display: none !important;
+            }
+            body.printing-block .schedule-report.printing,
+            body.printing-block .schedule-section-block.printing,
+            body.printing-block .workload-sheet.printing {
+                width: 100%;
+                max-width: 8.1in;
+                margin: 0 auto;
+                box-sizing: border-box;
+                break-inside: avoid;
+                page-break-inside: avoid;
+                page-break-after: avoid;
+            }
+            body.printing-block .schedule-report.printing {
+                display: block !important;
+            }
+            .schedule-section-block,
+            .workload-sheet,
+            .report-signature-sheet {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            .workload-sheet-supplemental {
+                break-before: page;
+                page-break-before: always;
+            }
+            .schedule-section-block {
+                margin-bottom: 0;
+            }
+            .workload-sheet {
+                margin-bottom: 0;
+                border-width: 1px;
+                padding: 6px 8px 4px;
+            }
+            .report-main-header {
+                margin-bottom: 3px;
+                line-height: 1.05;
+            }
+            .report-main-header img {
+                width: 36px;
+                margin-bottom: 1px;
+            }
+            .report-main-header .country-line {
+                font-size: 7px;
+            }
+            .report-main-header .university-line {
+                font-size: 10px;
+            }
+            .report-main-header .department-line {
+                font-size: 8px;
+            }
+            .report-main-header .title-line {
+                font-size: 8px;
+            }
+            .report-main-header .term-line {
+                font-size: 7px;
+            }
+            .workload-meta {
+                margin: 0 0 2px;
+                gap: 1px 8px;
+                font-size: 7px;
+            }
+            .workload-meta .meta-line {
+                padding-bottom: 1px;
+            }
+            .schedule-section-header {
+                padding: 2px 6px;
+                font-size: 8px;
+            }
+            .schedule-report-table,
+            .workload-table,
+            .workload-summary {
+                font-size: 7px;
+            }
+            .schedule-report-table th,
+            .schedule-report-table td,
+            .workload-table th,
+            .workload-table td,
+            .workload-summary td {
+                padding: 0.5px 1.5px;
+            }
+            .schedule-report-table .day-group-header td {
+                font-size: 7px;
+                padding: 1px 2px;
+            }
+            .schedule-report-table .description-cell {
+                line-height: 1.05;
+            }
+            .report-signature-sheet {
+                margin-top: 2px;
+                padding: 2px 0 0;
+            }
+            .report-signature-grid {
+                gap: 8px;
+                margin-bottom: 2px;
+            }
+            .signature-label {
+                font-size: 7px;
+                margin-bottom: 2px;
+            }
+            .signature-name {
+                font-size: 8px;
+            }
+            .signature-title,
+            .report-signature-meta,
+            .report-contact-lines div,
+            .report-contact-lines a {
+                font-size: 7px;
+            }
+            .report-contact-footer {
+                margin-top: 1px;
+                padding-top: 1px;
+                gap: 8px;
+            }
+            .report-contact-logos img {
+                width: 24px;
+            }
+            .print-footer {
+                display: none !important;
+            }
+        }
+    </style>
+
+    </head>
+<body class="report-page">
+        <div class="header">
+        <div class="header-content">
+            <div class="brand">
+                <img src="../assets/logo.png" alt="Academic Scheduling" class="logo">
+                <h1>NEMSU-CANTILAN</h1>
+            </div>
+            <div class="user-info">
+                <div class="user-meta">
+                    <div class="header-inline">
+                        <a href="dashboard.php">Dashboard</a>
+                        <span class="sep">/</span>
+                        <span class="welcome-text">Welcome, System Administrator</span>
+                    </div>
+                </div>
+                <a href="../logout.php" class="btn-logout">Logout</a>
+            </div>
+        </div>
+    </div>
+        
+        <div class="container ">
+        <h2>Faculty Workload Report</h2>
+
+                        
+                <!-- Filter Section -->
+        <div class="filter-section">
+            <h3>Filter Schedules</h3>
+            <form method="GET" action="" class="filter-form">
+                <datalist id="report_department_options">
+                                        <option value="CPE (CPE)"></option>
+                    <option value="CPE"></option>
+                                        <option value="CS (CS)"></option>
+                    <option value="CS"></option>
+                                        <option value="IT (IT)"></option>
+                    <option value="IT"></option>
+                                    </datalist>
+                <datalist id="report_program_options">
+                                        <option value="BS Computer Engineering (BSCpE)" data-department-id="1"></option>
+                    <option value="BSCpE" data-department-id="1"></option>
+                                        <option value="BS Computer Science (BSCS)" data-department-id="2"></option>
+                    <option value="BSCS" data-department-id="2"></option>
+                                        <option value="BS Information Technology (BSIT)" data-department-id="3"></option>
+                    <option value="BSIT" data-department-id="3"></option>
+                                    </datalist>
+                <datalist id="report_instructor_options">
+                                        <option value="AARON G. ARWITA"></option>
+                                        <option value="AARON G. ARWITA"></option>
+                                        <option value="ANGEL MAE F. LUGA"></option>
+                                        <option value="ARIEL A. DORMENDO"></option>
+                                        <option value="ARNIEL A. DIOSMAPARAN"></option>
+                                        <option value="BRIEG DINESE A. CANTILA"></option>
+                                        <option value="CENGE P. FLORES"></option>
+                                        <option value="CHERYL O. TAYO"></option>
+                                        <option value="CLYDE CHECTOPHER A. TIU"></option>
+                                        <option value="DARLENE A. ARMENIA"></option>
+                                        <option value="DARLENE A. ARMENIA"></option>
+                                        <option value="DIONE S. DUERO"></option>
+                                        <option value="ELIEMER B. BUCALON"></option>
+                                        <option value="ELMIE GRACE P. AZARCON"></option>
+                                        <option value="FAE MYLENE M. ETCHON"></option>
+                                        <option value="FEIL BJ B. FALCON"></option>
+                                        <option value="FEIL BJ B. FALCON"></option>
+                                        <option value="FRANKLIN M. GANANCIAS"></option>
+                                        <option value="HANS RYLE BUCALON"></option>
+                                        <option value="HELYN C. SUMAOY"></option>
+                                        <option value="HELYN S. SIMBOLAS"></option>
+                                        <option value="IZA F. MALIGSA"></option>
+                                        <option value="JAYPEE B. JULVE"></option>
+                                        <option value="JEANNY F. HUNGOY"></option>
+                                        <option value="JEANNY F. HUNGOY"></option>
+                                        <option value="JEHU ROEH C. RUBENIAL"></option>
+                                        <option value="JEMIMAH MAE C. SERING"></option>
+                                        <option value="JENELLIE ROSE V. GUEVARRA"></option>
+                                        <option value="JENELLIE ROSE V. GUEVARRA"></option>
+                                        <option value="JENNIFER L. OROZCO"></option>
+                                        <option value="JHON FRED V. PLAZA"></option>
+                                        <option value="JOEL S. GRACIA"></option>
+                                        <option value="JOHN CARL R. COQUILLA"></option>
+                                        <option value="JOHN FRED V. PLAZA"></option>
+                                        <option value="JOSEPHINE A. BASADRE"></option>
+                                        <option value="JULITO  O. BLASCO JR"></option>
+                                        <option value="KENNETH C. REATAZAN"></option>
+                                        <option value="KENNETH C. REATAZAN"></option>
+                                        <option value="LLOYD VINCENT P. CUBERO"></option>
+                                        <option value="LYNDON A. ROSAS"></option>
+                                        <option value="MARCEL L. BUDLONG"></option>
+                                        <option value="MARCEL L. BUDLONG"></option>
+                                        <option value="MARJORIE R. CUARTERO"></option>
+                                        <option value="MARJORIE R. CUARTERO"></option>
+                                        <option value="MARK TRISTAN V. BANGUIS"></option>
+                                        <option value="MARK VINCENT ARNALDO"></option>
+                                        <option value="MARNIE ROSE P. LUAD"></option>
+                                        <option value="MATT SIMON S. URBIZTONDO"></option>
+                                        <option value="MERINELLE A. GOMEZ"></option>
+                                        <option value="MICHOL ANTHONY U. ARREZA"></option>
+                                        <option value="NANCY MARIE M. ARIMANG"></option>
+                                        <option value="NELYNE LOURDES Y. PLAZA"></option>
+                                        <option value="PEARL AJ G. FALLADO"></option>
+                                        <option value="PEARL AJ G. FALLADO"></option>
+                                        <option value="RANDY H. ARRUBIO"></option>
+                                        <option value="RANDY H. ARRUBIO"></option>
+                                        <option value="RC FRODAGY C. RAMIREZ"></option>
+                                        <option value="ROD CHRISTIA MAYE A. OROZCO"></option>
+                                        <option value="ROY D. OBATAY"></option>
+                                        <option value="SHARON A. BUCALON"></option>
+                                        <option value="SHARON G. AZARCON"></option>
+                                        <option value="YNA B. ORTEGA"></option>
+                                        <option value="ZHYRA P. ROSIL"></option>
+                                        <option value="ZHYRA P. ROSIL"></option>
+                                    </datalist>
+                <div class="form-group">
+                    <label for="department">Department:</label>
+                    <input type="text" id="department" name="department" list="report_department_options" value="" placeholder="Type department...">
+                </div>
+
+                <div class="form-group">
+                    <label for="program">Program:</label>
+                    <input type="text" id="program" name="program" list="report_program_options" value="" placeholder="Type program...">
+                </div>
+                
+                <div class="form-group">
+                    <label for="year_level">Year Level:</label>
+                    <select id="year_level" name="year_level">
+                        <option value="">All Years</option>
+                        <option value="1" >1st Year</option>
+                        <option value="2" >2nd Year</option>
+                        <option value="3" >3rd Year</option>
+                        <option value="4" >4th Year</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="instructor">Instructor:</label>
+                    <input type="text" id="instructor" name="instructor" list="report_instructor_options" value="JEHU ROEH C. RUBENIAL" placeholder="Type instructor name...">
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn-primary">Apply Filters</button>
+                    <a href="report.php" class="btn-secondary">Clear Filters</a>
+                    <a href="report.php?print=1&department=&program=&year_level=&instructor=JEHU+ROEH+C.+RUBENIAL" 
+                       class="btn-primary" target="_blank">Print Report</a>
+                    <a href="report.php?export=csv&department=&program=&year_level=&instructor=JEHU+ROEH+C.+RUBENIAL" class="btn-secondary">Download CSV</a>
+                    <a href="report.php?export=excel&department=&program=&year_level=&instructor=JEHU+ROEH+C.+RUBENIAL" class="btn-secondary">Download Excel</a>
+                </div>
+            </form>
+        </div>
+
+        <div class="conflict-summary is-clear">
+            <div class="conflict-summary-header">
+                <div>
+                    <h3>Conflict Check Summary</h3>
+                    <div>
+                                                    All published schedules are currently conflict-free.
+                                            </div>
+                </div>
+                <div class="conflict-summary-status">
+                    No Conflicts Found                </div>
+            </div>
+
+            <div class="conflict-summary-grid">
+                <div class="conflict-summary-card">
+                    <strong>209</strong>
+                    <span>Published schedule rows</span>
+                </div>
+                <div class="conflict-summary-card">
+                    <strong>9</strong>
+                    <span>Published jobs</span>
+                </div>
+                <div class="conflict-summary-card">
+                    <strong>9</strong>
+                    <span>Completed jobs</span>
+                </div>
+                <div class="conflict-summary-card">
+                    <strong>0</strong>
+                    <span>Room conflict groups</span>
+                </div>
+                <div class="conflict-summary-card">
+                    <strong>0</strong>
+                    <span>Instructor conflict groups</span>
+                </div>
+                <div class="conflict-summary-card">
+                    <strong>0</strong>
+                    <span>Section conflict groups</span>
+                </div>
+            </div>
+
+            
+            <div class="conflict-summary-note">
+                Checked at April 24, 2026 8:35 AM.
+                Current report view contains 10 row(s) after filters.
+            </div>
+        </div>
+        
+        
+        <!-- Schedule Report: one block per Course/Year/Sec (e.g. 1 BLOCK (A), 2 BLOCK (A)) -->
+        <div class="schedule-report">
+                            <div class="workload-report-group">
+                <div class="workload-sheet">
+                    <div class="block-print-container">
+                        <div class="report-main-header">
+                            <img src="../assets/logo.png" alt="NEMSU logo">
+                            <div class="country-line">Republic of the Philippines</div>
+                            <div class="university-line">North Eastern Mindanao State University</div>
+                            <div class="department-line">Department of Computer Studies</div>
+                            <div class="title-line">FACULTY WORKLOAD</div>
+                            <div class="term-line">2ND SEM A.Y. 2025-2026</div>
+                        </div>
+                        <button class="block-print-btn" onclick="printBlock(this)" title="Print this workload">Print</button>
+                    </div>
+
+                    <div class="workload-meta">
+                        <div class="meta-line"><span class="meta-label">Name:</span><span>JEHU ROEH C. RUBENIAL</span></div>
+                        <div class="meta-line"><span class="meta-label">Educ'l Qualification:</span><span>DIT</span></div>
+                        <div class="meta-line"><span class="meta-label">Years in Service:</span><span>7 Years</span></div>
+                        <div class="meta-line"><span class="meta-label">Major:</span><span>-</span></div>
+                        <div class="meta-line"><span class="meta-label">Status:</span><span>Permanent</span></div>
+                        <div class="meta-line"><span class="meta-label">Eligibility/PRC:</span><span>-</span></div>
+                    </div>
+
+                    
+                    
+                    
+                                        <div class="no-print" style="margin-bottom: 10px; border: 1px solid #ddd; padding: 10px;">
+                        <strong>Vacant Slot Consultation</strong>
+                        <form method="POST" style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                            <input type="hidden" name="consultation_instructor_id" value="30">
+                            <select id="consultation_day_group" name="consultation_day_group" required>
+                                                                    <option value="MTh/Morning">MTH/Morning</option>
+                                                                    <option value="MTh/Afternoon">MTH/Afternoon</option>
+                                                                    <option value="Wed/Morning">WED/Morning</option>
+                                                                    <option value="Wed/Afternoon">WED/Afternoon</option>
+                                                                    <option value="TF/Morning">TF/Morning</option>
+                                                                    <option value="TF/Afternoon">TF/Afternoon</option>
+                                                                    <option value="Saturday">SATURDAY</option>
+                                                            </select>
+                            <select id="consultation_time_label" name="consultation_time_label" required></select>
+                            <input type="text" name="consultation_note" value="Consultation" maxlength="120" placeholder="Consultation note">
+                            <button type="submit" name="add_consultation_slot" class="btn-primary">Save Consultation Slot</button>
+                        </form>
+                                            </div>
+                    
+                    <table class="workload-table">
+                        <thead>
+                            <tr>
+                                <th>TIME/DAY</th>
+                                <th>Subject Code</th>
+                                <th>Description</th>
+                                <th>Course Code</th>
+                                <th>No. of Students</th>
+                                <th>Units</th>
+                                <th>No. of Hours</th>
+                                <th>Room No.</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                                                                                            <tr class="workload-group">
+                                    <td colspan="8">MTH/Morning</td>
+                                </tr>
+                                                                                                                                                                                                    <tr>
+                                                        <td>7:00-8:30 (Monday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lab)</td>
+                                                        <td>BSIT 1A</td>
+                                                        <td>35</td>
+                                                        <td>1.50</td>
+                                                        <td>1.50</td>
+                                                        <td>Lab-1</td>
+                                                    </tr>
+                                                                                                        <tr>
+                                                        <td>7:00-8:30 (Thursday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lab)</td>
+                                                        <td>BSIT 1B</td>
+                                                        <td>35</td>
+                                                        <td>1.50</td>
+                                                        <td>1.50</td>
+                                                        <td>NETWORKING-2</td>
+                                                    </tr>
+                                                                                                                                                                                                                                                                                            <tr>
+                                                        <td>8:30-10:00 (Monday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lab)</td>
+                                                        <td>BSIT 1C</td>
+                                                        <td>35</td>
+                                                        <td>1.50</td>
+                                                        <td>1.50</td>
+                                                        <td>Lab-8</td>
+                                                    </tr>
+                                                                                                        <tr>
+                                                        <td>8:30-10:00 (Thursday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lab)</td>
+                                                        <td>BSIT 1E</td>
+                                                        <td>35</td>
+                                                        <td>1.50</td>
+                                                        <td>1.50</td>
+                                                        <td>Lab-6</td>
+                                                    </tr>
+                                                                                                                                                                                                                                                                                <tr>
+                                            <td>9:00-10:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>10:00-11:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                    <tr class="lunch-row">
+                                            <td>11:30-1:00</td>
+                                            <td colspan="7">BREAK TIME</td>
+                                        </tr>
+                                                                                                                                                                                                                                        <tr>
+                                                        <td>10:00-11:00 (Monday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lec)</td>
+                                                        <td>BSIT 1B</td>
+                                                        <td>35</td>
+                                                        <td>1.00</td>
+                                                        <td>1.00</td>
+                                                        <td>Lab-10</td>
+                                                    </tr>
+                                                                                                        <tr>
+                                                        <td>10:00-11:00 (Thursday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lec)</td>
+                                                        <td>BSIT 1C</td>
+                                                        <td>35</td>
+                                                        <td>1.00</td>
+                                                        <td>1.00</td>
+                                                        <td>Lecture 5</td>
+                                                    </tr>
+                                                                                                                                                                                                                    <tr class="workload-group">
+                                    <td colspan="8">MTH/Afternoon</td>
+                                </tr>
+                                                                                                                                                                                        <tr>
+                                            <td>1:00-2:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>2:30-4:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>4:00-5:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                                        <tr>
+                                                        <td>1:00-2:00 (Monday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lec)</td>
+                                                        <td>BSIT 1D</td>
+                                                        <td>35</td>
+                                                        <td>1.00</td>
+                                                        <td>1.00</td>
+                                                        <td>Lab-4</td>
+                                                    </tr>
+                                                                                                        <tr>
+                                                        <td>1:00-2:00 (Thursday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lec)</td>
+                                                        <td>BSIT 1E</td>
+                                                        <td>40</td>
+                                                        <td>1.00</td>
+                                                        <td>1.00</td>
+                                                        <td>Lecture 1</td>
+                                                    </tr>
+                                                                                                                                                                                                                    <tr class="workload-group">
+                                    <td colspan="8">WED/Morning</td>
+                                </tr>
+                                                                                                                                                                                        <tr>
+                                            <td>7:00-8:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>8:30-10:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>9:00-10:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>10:00-11:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                    <tr class="lunch-row">
+                                            <td>11:30-1:00</td>
+                                            <td colspan="7">BREAK TIME</td>
+                                        </tr>
+                                                                                                                                                                <tr class="workload-group">
+                                    <td colspan="8">WED/Afternoon</td>
+                                </tr>
+                                                                                                                                                                                        <tr>
+                                            <td>1:00-2:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>2:30-4:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>4:00-5:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                <tr class="workload-group">
+                                    <td colspan="8">TF/Morning</td>
+                                </tr>
+                                                                                                                                                                                        <tr>
+                                            <td>7:00-8:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>8:30-10:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>9:00-10:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>10:00-11:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                    <tr class="lunch-row">
+                                            <td>11:30-1:00</td>
+                                            <td colspan="7">BREAK TIME</td>
+                                        </tr>
+                                                                                                                                                                <tr class="workload-group">
+                                    <td colspan="8">TF/Afternoon</td>
+                                </tr>
+                                                                                                                                                                                                    <tr>
+                                                        <td>1:00-2:30 (Tuesday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lab)</td>
+                                                        <td>BSIT 1D</td>
+                                                        <td>35</td>
+                                                        <td>3.00</td>
+                                                        <td>3.00</td>
+                                                        <td>Lab-9</td>
+                                                    </tr>
+                                                                                                                                                                                                                                                                                <tr>
+                                            <td>2:30-4:00</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                            <tr>
+                                            <td>4:00-5:30</td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                                                                                                                                        <tr>
+                                                        <td>4:00-5:00 (Friday)</td>
+                                                        <td>CS101</td>
+                                                        <td>Introduction to Programming I (Lec)</td>
+                                                        <td>BSIT 1A</td>
+                                                        <td>45</td>
+                                                        <td>2.00</td>
+                                                        <td>2.00</td>
+                                                        <td>Lecture 3</td>
+                                                    </tr>
+                                                                                                                                                                                                                    <tr class="workload-group">
+                                    <td colspan="8">SATURDAY</td>
+                                </tr>
+                                                                                                                                                                                        <tr>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                            <td></td>
+                                        </tr>
+                                                                                                                        </tbody>
+                    </table>
+
+                    <table class="workload-summary">
+                        <tr>
+                            <td class="summary-label">No. of Units</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>11.50</td>
+                            <td>15.00</td>
+                            <td></td>
+                        </tr>
+                                                <tr>
+                            <td class="summary-label">Designation</td>
+                            <td>ICT Coordinator/TWG</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>6.00</td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td class="summary-label">Research/Extension</td>
+                            <td>Research/Extension</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>3.00</td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td class="summary-label">Add: Special Assignment</td>
+                            <td>-</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>0.00</td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                                                <tr>
+                            <td class="summary-label">No. of Preparation</td>
+                            <td>1</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                        </tr>
+                        <tr>
+                            <td class="summary-label">Total No. of Units</td>
+                            <td>Regular Load</td>
+                            <td></td>
+                            <td></td>
+                            <td></td>
+                            <td>11.50</td>
+                            <td>15.00</td>
+                            <td></td>
+                        </tr>
+                    </table>
+
+                            <div class="faculty-signatures instructor-signatures">
+        <div class="faculty-signature-row">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label">Prepared by:</div>
+                <div class="faculty-signature-name">NELYNE LOURDES Y. PLAZA, Ph.D., PCpE</div>
+                <div class="faculty-signature-title">Chair, Dept. Computer Studies</div>
+            </div>
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label">Conformed:</div>
+                <div class="faculty-signature-name">JEHU ROEH C. RUBENIAL</div>
+                <div class="faculty-signature-title">Permanent</div>
+            </div>
+        </div>
+        <div class="faculty-signature-row-label">Recommending Approval:</div>
+        <div class="faculty-signature-row">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-name">JUANCHO A. INTANO, Ph.D.</div>
+                <div class="faculty-signature-title">Campus Director</div>
+            </div>
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-name">ENGR. ALEX S. LADAGA, Ph.D.</div>
+                <div class="faculty-signature-title">Dean, CITE</div>
+            </div>
+        </div>
+        <div class="faculty-signature-row single">
+            <div class="faculty-signature-block">
+                <div class="faculty-signature-label faculty-signature-label-centered">Approved:</div>
+                <div class="faculty-signature-name">MARIA LADY SOL A. SUAZO, Ph.D.</div>
+                <div class="faculty-signature-title">VP - Academic Affairs</div>
+            </div>
+        </div>
+    </div>
+                    </div>
+                                </div>
+                    </div>
+
+                <div class="report-signatory-settings">
+            <h3>Report Header and Footer Details</h3>
+            <div class="form-hint">
+                Update the header text, signatories, contact details, and footer logo image paths here. Change the logo paths anytime if the official logos are replaced in the future.
+            </div>
+            <form method="POST" enctype="multipart/form-data">
+                <div class="signatory-settings-grid">
+                                                            <div class="form-group">
+                        <label for="header_country">
+                            Header Country                        </label>
+                        <input
+                            type="text"
+                            id="header_country"
+                            name="header_country"
+                            value="Republic of the Philippines"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="header_university">
+                            Header University                        </label>
+                        <input
+                            type="text"
+                            id="header_university"
+                            name="header_university"
+                            value="North Eastern Mindanao State University"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="header_department">
+                            Header Department                        </label>
+                        <input
+                            type="text"
+                            id="header_department"
+                            name="header_department"
+                            value="Department of Computer Studies"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="header_title">
+                            Header Title                        </label>
+                        <input
+                            type="text"
+                            id="header_title"
+                            name="header_title"
+                            value="CLASS PROGRAM"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="header_term">
+                            Header Term                        </label>
+                        <input
+                            type="text"
+                            id="header_term"
+                            name="header_term"
+                            value="2ND SEM A.Y. 2025-2026"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="prepared_by_label">
+                            Prepared By Label                        </label>
+                        <input
+                            type="text"
+                            id="prepared_by_label"
+                            name="prepared_by_label"
+                            value="Prepared by:"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="prepared_by_name">
+                            Prepared By Name                        </label>
+                        <input
+                            type="text"
+                            id="prepared_by_name"
+                            name="prepared_by_name"
+                            value="DIONE S. DUERO"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="prepared_by_title">
+                            Prepared By Title                        </label>
+                        <input
+                            type="text"
+                            id="prepared_by_title"
+                            name="prepared_by_title"
+                            value="Program Coordinator - CS"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="recommending_label">
+                            Recommending Label                        </label>
+                        <input
+                            type="text"
+                            id="recommending_label"
+                            name="recommending_label"
+                            value="Recommending Approval:"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="recommending_name">
+                            Recommending Name                        </label>
+                        <input
+                            type="text"
+                            id="recommending_name"
+                            name="recommending_name"
+                            value="RAMONALIZA A. ESPENIDO, MST-SS"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="recommending_title">
+                            Recommending Title                        </label>
+                        <input
+                            type="text"
+                            id="recommending_title"
+                            name="recommending_title"
+                            value="Registrar III"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="noted_by_label">
+                            Noted By Label                        </label>
+                        <input
+                            type="text"
+                            id="noted_by_label"
+                            name="noted_by_label"
+                            value="Noted by:"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="noted_by_name">
+                            Noted By Name                        </label>
+                        <input
+                            type="text"
+                            id="noted_by_name"
+                            name="noted_by_name"
+                            value="ENGR. NELYNE LOURDES Y. PLAZA, Ph.D."
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="noted_by_title">
+                            Noted By Title                        </label>
+                        <input
+                            type="text"
+                            id="noted_by_title"
+                            name="noted_by_title"
+                            value="Dept. Chair, Dept. of Computer Studies"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="approved_by_label">
+                            Approved By Label                        </label>
+                        <input
+                            type="text"
+                            id="approved_by_label"
+                            name="approved_by_label"
+                            value="Approved:"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="approved_by_name">
+                            Approved By Name                        </label>
+                        <input
+                            type="text"
+                            id="approved_by_name"
+                            name="approved_by_name"
+                            value="JUANCHO A. INTANO, Ph.D."
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="approved_by_title">
+                            Approved By Title                        </label>
+                        <input
+                            type="text"
+                            id="approved_by_title"
+                            name="approved_by_title"
+                            value="Campus Director"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_prepared_by_name">
+                            Instructor Prepared By Name                        </label>
+                        <input
+                            type="text"
+                            id="instructor_prepared_by_name"
+                            name="instructor_prepared_by_name"
+                            value="NELYNE LOURDES Y. PLAZA, Ph.D., PCpE"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_prepared_by_title">
+                            Instructor Prepared By Title                        </label>
+                        <input
+                            type="text"
+                            id="instructor_prepared_by_title"
+                            name="instructor_prepared_by_title"
+                            value="Chair, Dept. Computer Studies"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_recommending_1_name">
+                            Instructor Recommending 1 Name                        </label>
+                        <input
+                            type="text"
+                            id="instructor_recommending_1_name"
+                            name="instructor_recommending_1_name"
+                            value="JUANCHO A. INTANO, Ph.D."
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_recommending_1_title">
+                            Instructor Recommending 1 Title                        </label>
+                        <input
+                            type="text"
+                            id="instructor_recommending_1_title"
+                            name="instructor_recommending_1_title"
+                            value="Campus Director"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_recommending_2_name">
+                            Instructor Recommending 2 Name                        </label>
+                        <input
+                            type="text"
+                            id="instructor_recommending_2_name"
+                            name="instructor_recommending_2_name"
+                            value="ENGR. ALEX S. LADAGA, Ph.D."
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_recommending_2_title">
+                            Instructor Recommending 2 Title                        </label>
+                        <input
+                            type="text"
+                            id="instructor_recommending_2_title"
+                            name="instructor_recommending_2_title"
+                            value="Dean, CITE"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_approved_by_name">
+                            Instructor Approved By Name                        </label>
+                        <input
+                            type="text"
+                            id="instructor_approved_by_name"
+                            name="instructor_approved_by_name"
+                            value="MARIA LADY SOL A. SUAZO, Ph.D."
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="instructor_approved_by_title">
+                            Instructor Approved By Title                        </label>
+                        <input
+                            type="text"
+                            id="instructor_approved_by_title"
+                            name="instructor_approved_by_title"
+                            value="VP - Academic Affairs"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="document_code">
+                            Document Code                        </label>
+                        <input
+                            type="text"
+                            id="document_code"
+                            name="document_code"
+                            value="FM-ACAD-024/Rev002/01.26.2026/Page1"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="contact_address">
+                            Contact Address                        </label>
+                        <input
+                            type="text"
+                            id="contact_address"
+                            name="contact_address"
+                            value="Cantilan, Surigao del Sur 8317"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="contact_phone">
+                            Contact Phone                        </label>
+                        <input
+                            type="text"
+                            id="contact_phone"
+                            name="contact_phone"
+                            value="086-212-2723"
+                        >
+                    </div>
+                                                            <div class="form-group">
+                        <label for="contact_website">
+                            Contact Website                        </label>
+                        <input
+                            type="text"
+                            id="contact_website"
+                            name="contact_website"
+                            value="www.nemsu.edu.ph"
+                        >
+                    </div>
+                                                                                                                        <div class="logo-setting">
+                        <label for="footer_logo_1">
+                            FOOTER LOGO 1                        </label>
+                        <div class="logo-setting-preview">
+                                                                                        <img src="../assets/report_logos/footer_logo_1_1773282888.png" alt="Current logo">
+                                                    </div>
+                        <input
+                            type="text"
+                            id="footer_logo_1"
+                            name="footer_logo_1"
+                            value="../assets/report_logos/footer_logo_1_1773282888.png"
+                            placeholder="../assets/logo.png or upload below"
+                        >
+                        <input
+                            class="logo-setting-upload"
+                            type="file"
+                            id="footer_logo_1_upload"
+                            name="footer_logo_1_upload"
+                            accept=".png,.jpg,.jpeg,.gif,.webp,.svg"
+                        >
+                    </div>
+                                        <div class="logo-setting">
+                        <label for="footer_logo_2">
+                            FOOTER LOGO 2                        </label>
+                        <div class="logo-setting-preview">
+                                                                                        <span>No logo selected</span>
+                                                    </div>
+                        <input
+                            type="text"
+                            id="footer_logo_2"
+                            name="footer_logo_2"
+                            value=""
+                            placeholder="../assets/logo.png or upload below"
+                        >
+                        <input
+                            class="logo-setting-upload"
+                            type="file"
+                            id="footer_logo_2_upload"
+                            name="footer_logo_2_upload"
+                            accept=".png,.jpg,.jpeg,.gif,.webp,.svg"
+                        >
+                    </div>
+                                        <div class="logo-setting">
+                        <label for="footer_logo_3">
+                            FOOTER LOGO 3                        </label>
+                        <div class="logo-setting-preview">
+                                                                                        <span>No logo selected</span>
+                                                    </div>
+                        <input
+                            type="text"
+                            id="footer_logo_3"
+                            name="footer_logo_3"
+                            value=""
+                            placeholder="../assets/logo.png or upload below"
+                        >
+                        <input
+                            class="logo-setting-upload"
+                            type="file"
+                            id="footer_logo_3_upload"
+                            name="footer_logo_3_upload"
+                            accept=".png,.jpg,.jpeg,.gif,.webp,.svg"
+                        >
+                    </div>
+                                    </div>
+                <div class="form-actions" style="margin-top: 16px;">
+                    <button type="submit" name="save_report_signatories" class="btn-primary">Save Report Settings</button>
+                </div>
+            </form>
+        </div>
+        
+                <script>
+            function printBlock(btn) {
+                const workloadGroup = btn.closest('.workload-report-group');
+                if (workloadGroup) {
+                    document.body.classList.add('printing-block');
+                    workloadGroup.closest('.schedule-report')?.classList.add('printing');
+                    workloadGroup.querySelectorAll('.workload-sheet').forEach(function (node) {
+                        node.classList.add('printing');
+                    });
+                    setTimeout(() => window.print(), 100);
+                    return;
+                }
+
+                const block = btn.closest('.schedule-section-block') || btn.closest('.workload-sheet');
+                if (!block) {
+                    window.print();
+                    return;
+                }
+
+                document.body.classList.add('printing-block');
+                block.closest('.schedule-report')?.classList.add('printing');
+                block.classList.add('printing');
+                setTimeout(() => window.print(), 100);
+            }
+
+            window.addEventListener('afterprint', function () {
+                document.body.classList.remove('printing-block');
+                document.querySelectorAll('.printing').forEach(function (node) {
+                    node.classList.remove('printing');
+                });
+            });
+
+            const departmentInput = document.getElementById('department');
+            const programInput = document.getElementById('program');
+            const departmentOptions = [{"id":1,"name":"CPE","code":"CPE","label":"CPE (CPE)"},{"id":2,"name":"CS","code":"CS","label":"CS (CS)"},{"id":3,"name":"IT","code":"IT","label":"IT (IT)"}];
+            const programOptions = [{"name":"BS Computer Engineering","code":"BSCpE","label":"BS Computer Engineering (BSCpE)","department_id":1},{"name":"BS Computer Science","code":"BSCS","label":"BS Computer Science (BSCS)","department_id":2},{"name":"BS Information Technology","code":"BSIT","label":"BS Information Technology (BSIT)","department_id":3}];
+
+            function resolveDepartmentId() {
+                if (!departmentInput) {
+                    return 0;
+                }
+                const current = String(departmentInput.value || '').trim().toLowerCase();
+                const match = departmentOptions.find(option => {
+                    return option.name.toLowerCase() === current
+                        || option.code.toLowerCase() === current
+                        || option.label.toLowerCase() === current;
+                });
+                return match ? Number(match.id || 0) : 0;
+            }
+
+            function syncProgramOptions() {
+                const dataList = document.getElementById('report_program_options');
+                if (!programInput || !dataList) {
+                    return;
+                }
+                const selectedDepartmentId = resolveDepartmentId();
+                const currentValue = String(programInput.value || '').trim().toLowerCase();
+                const allowedPrograms = programOptions.filter(option => selectedDepartmentId === 0 || Number(option.department_id) === selectedDepartmentId);
+                dataList.innerHTML = '';
+                allowedPrograms.forEach(option => {
+                    const byLabel = document.createElement('option');
+                    byLabel.value = option.label;
+                    dataList.appendChild(byLabel);
+
+                    const byCode = document.createElement('option');
+                    byCode.value = option.code;
+                    dataList.appendChild(byCode);
+                });
+                if (currentValue !== '') {
+                    const stillValid = allowedPrograms.some(option =>
+                        option.label.toLowerCase() === currentValue || option.code.toLowerCase() === currentValue || option.name.toLowerCase() === currentValue
+                    );
+                    if (!stillValid) {
+                        programInput.value = '';
+                    }
+                }
+            }
+
+            if (departmentInput && programInput) {
+                departmentInput.addEventListener('input', syncProgramOptions);
+                syncProgramOptions();
+            }
+
+            const consultationTimeOptionsByGroup = {"MTh\/Morning":["7:00-8:30","8:30-10:00","9:00-10:00","10:00-11:30"],"MTh\/Afternoon":["1:00-2:30","2:30-4:00","4:00-5:30"],"Wed\/Morning":["7:00-8:30","8:30-10:00","9:00-10:00","10:00-11:30"],"Wed\/Afternoon":["1:00-2:30","2:30-4:00","4:00-5:30"],"TF\/Morning":["7:00-8:30","8:30-10:00","9:00-10:00","10:00-11:30"],"TF\/Afternoon":["1:00-2:30","2:30-4:00","4:00-5:30"],"Saturday":[]};
+            const consultationDayGroupSelect = document.getElementById('consultation_day_group');
+            const consultationTimeLabelSelect = document.getElementById('consultation_time_label');
+            function syncConsultationTimeOptions() {
+                if (!consultationDayGroupSelect || !consultationTimeLabelSelect) {
+                    return;
+                }
+                const selectedGroup = consultationDayGroupSelect.value || '';
+                const options = consultationTimeOptionsByGroup[selectedGroup] || [];
+                consultationTimeLabelSelect.innerHTML = '';
+                options.forEach(label => {
+                    const opt = document.createElement('option');
+                    opt.value = label;
+                    opt.textContent = label;
+                    consultationTimeLabelSelect.appendChild(opt);
+                });
+            }
+            if (consultationDayGroupSelect && consultationTimeLabelSelect) {
+                consultationDayGroupSelect.addEventListener('change', syncConsultationTimeOptions);
+                syncConsultationTimeOptions();
+            }
+
+                    </script>
+    </div>
+</body>
+</html>
+

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 import random
 import time
 import mysql.connector
 from datetime import datetime
 import traceback
-from collections import Counter
+from collections import Counter, OrderedDict
 
 # ================= GA DEFAULT PARAMETERS =================
 DEFAULT_POPULATION_SIZE = 30  # Further reduced for very fast execution
@@ -14,20 +15,63 @@ DEFAULT_GENERATIONS = 50      # Further reduced for very fast execution
 DEFAULT_MUTATION_RATE = 0.2   # Increased for more exploration
 DEFAULT_CROSSOVER_RATE = 0.9  # Increased for more recombination
 DEFAULT_ELITE_SIZE = 2        # Reduced elite size
+PROGRESS_DB_WRITE_THROTTLE_SECONDS = 2.0
+RUNTIME_SCHEMA_CACHE_TTL_SECONDS = 300
 
 WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']
 SATURDAY = 'saturday'
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+RUNTIME_SCHEMA_CACHE_PATH = os.path.join(PROJECT_ROOT, "logs", ".runtime_schema_cache.json")
+
+
+def build_db_config():
+    return {
+        'host': os.getenv('ACADEMIC_SCHEDULING_DB_HOST', 'localhost'),
+        'user': os.getenv('ACADEMIC_SCHEDULING_DB_USER', 'root'),
+        'password': os.getenv('ACADEMIC_SCHEDULING_DB_PASS', ''),
+        'database': os.getenv('ACADEMIC_SCHEDULING_DB_NAME', 'academic_scheduling'),
+    }
+
+
+def has_fresh_runtime_schema_cache(db_config):
+    try:
+        with open(RUNTIME_SCHEMA_CACHE_PATH, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+    except Exception:
+        return False
+
+    checked_at = float(payload.get('checked_at') or 0)
+    if checked_at <= 0 or (time.time() - checked_at) > RUNTIME_SCHEMA_CACHE_TTL_SECONDS:
+        return False
+
+    return (
+        payload.get('host') == db_config.get('host')
+        and payload.get('database') == db_config.get('database')
+        and payload.get('user') == db_config.get('user')
+    )
+
+
+def write_runtime_schema_cache(db_config):
+    try:
+        os.makedirs(os.path.dirname(RUNTIME_SCHEMA_CACHE_PATH), exist_ok=True)
+        with open(RUNTIME_SCHEMA_CACHE_PATH, 'w', encoding='utf-8') as handle:
+            json.dump({
+                'checked_at': time.time(),
+                'host': db_config.get('host'),
+                'database': db_config.get('database'),
+                'user': db_config.get('user'),
+            }, handle)
+    except Exception:
+        pass
 
 class ScheduleGA:
     def __init__(self, job_id):
         self.job_id = job_id
-        self.db_config = {
-            'host': 'localhost',
-            'user': 'root', 
-            'password': '',
-            'database': 'academic_scheduling'
-        }
+        self.db_config = build_db_config()
         self._job_conn = None
+        self.fitness_cache = OrderedDict()
+        self.fitness_cache_limit = 4096
+        self.partial_fitness_viable_threshold = 86
         self.load_data()
         self.genes = self.create_genes()
         self.target_gene_counter = Counter(self.get_gene_identity(gene) for gene in self.genes)
@@ -47,50 +91,59 @@ class ScheduleGA:
 
         # Schema upgrades for progress tracking (non-blocking).
         # Avoid repeated information_schema lookups by fetching existing columns once.
-        schema_checks = {
-            'schedule_jobs': {
-                'error_message': "ALTER TABLE schedule_jobs ADD COLUMN error_message TEXT NULL AFTER completed_at",
-                'progress_percent': "ALTER TABLE schedule_jobs ADD COLUMN progress_percent INT NOT NULL DEFAULT 0 AFTER status",
-                'current_generation': "ALTER TABLE schedule_jobs ADD COLUMN current_generation INT NOT NULL DEFAULT 0 AFTER progress_percent",
-                'total_generations': "ALTER TABLE schedule_jobs ADD COLUMN total_generations INT NOT NULL DEFAULT 0 AFTER current_generation",
-                'best_fitness': "ALTER TABLE schedule_jobs ADD COLUMN best_fitness INT NOT NULL DEFAULT 0 AFTER total_generations",
-            },
-            'schedules': {
-                'scheduled_hours': "ALTER TABLE schedules ADD COLUMN scheduled_hours DECIMAL(5,2) NULL AFTER section",
-                'meeting_kind': "ALTER TABLE schedules ADD COLUMN meeting_kind ENUM('lecture','lab') NULL AFTER scheduled_hours",
-                'scheduled_minutes': "ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours",
-                'is_overload': "ALTER TABLE schedules ADD COLUMN is_overload TINYINT(1) NOT NULL DEFAULT 0 AFTER is_published",
-            },
-        }
+        if not has_fresh_runtime_schema_cache(self.db_config):
+            schema_checks = {
+                'schedule_jobs': {
+                    'error_message': "ALTER TABLE schedule_jobs ADD COLUMN error_message TEXT NULL AFTER completed_at",
+                    'progress_percent': "ALTER TABLE schedule_jobs ADD COLUMN progress_percent INT NOT NULL DEFAULT 0 AFTER status",
+                    'current_generation': "ALTER TABLE schedule_jobs ADD COLUMN current_generation INT NOT NULL DEFAULT 0 AFTER progress_percent",
+                    'total_generations': "ALTER TABLE schedule_jobs ADD COLUMN total_generations INT NOT NULL DEFAULT 0 AFTER current_generation",
+                    'best_fitness': "ALTER TABLE schedule_jobs ADD COLUMN best_fitness INT NOT NULL DEFAULT 0 AFTER total_generations",
+                },
+                'schedules': {
+                    'scheduled_hours': "ALTER TABLE schedules ADD COLUMN scheduled_hours DECIMAL(5,2) NULL AFTER section",
+                    'meeting_kind': "ALTER TABLE schedules ADD COLUMN meeting_kind ENUM('lecture','lab') NULL AFTER scheduled_hours",
+                    'scheduled_minutes': "ALTER TABLE schedules ADD COLUMN scheduled_minutes INT NULL AFTER scheduled_hours",
+                    'is_overload': "ALTER TABLE schedules ADD COLUMN is_overload TINYINT(1) NOT NULL DEFAULT 0 AFTER is_published",
+                },
+            }
 
-        existing_cols = {'schedule_jobs': set(), 'schedules': set()}
-        try:
-            cursor.execute(
-                """
-                SELECT TABLE_NAME, COLUMN_NAME
-                FROM information_schema.COLUMNS
-                WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME IN ('schedule_jobs', 'schedules')
-                """,
-                (self.db_config['database'],),
-            )
-            for row in cursor.fetchall():
-                table_name = str(row.get('TABLE_NAME') or '')
-                col_name = str(row.get('COLUMN_NAME') or '')
-                if table_name in existing_cols and col_name:
-                    existing_cols[table_name].add(col_name)
-        except Exception:
-            existing_cols = {}
+            existing_cols = {'schedule_jobs': set(), 'schedules': set()}
+            schema_validation_ok = True
+            schema_changed = False
+            try:
+                cursor.execute(
+                    """
+                    SELECT TABLE_NAME, COLUMN_NAME
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = %s
+                      AND TABLE_NAME IN ('schedule_jobs', 'schedules')
+                    """,
+                    (self.db_config['database'],),
+                )
+                for row in cursor.fetchall():
+                    table_name = str(row.get('TABLE_NAME') or '')
+                    col_name = str(row.get('COLUMN_NAME') or '')
+                    if table_name in existing_cols and col_name:
+                        existing_cols[table_name].add(col_name)
+            except Exception:
+                existing_cols = {}
+                schema_validation_ok = False
 
-        for table_name, checks in schema_checks.items():
-            for col_name, sql in checks.items():
-                try:
-                    if col_name in existing_cols.get(table_name, set()):
-                        continue
-                    cursor.execute(sql)
-                    conn.commit()
-                except Exception:
-                    pass
+            for table_name, checks in schema_checks.items():
+                for col_name, sql in checks.items():
+                    try:
+                        if col_name in existing_cols.get(table_name, set()):
+                            continue
+                        cursor.execute(sql)
+                        schema_changed = True
+                    except Exception:
+                        schema_validation_ok = False
+
+            if schema_changed:
+                conn.commit()
+            if schema_validation_ok:
+                write_runtime_schema_cache(self.db_config)
 
         cursor.execute("SELECT input_data FROM schedule_jobs WHERE id = %s", (self.job_id,))
         result = cursor.fetchone()
@@ -142,38 +195,6 @@ class ScheduleGA:
         self.last_reported_generation = -1
         self.last_reported_best_fit = -1
 
-        self.instructor_subject_codes = {}
-        instructor_ids = [inst['id'] for inst in self.input_data.get('instructors', [])]
-        if instructor_ids:
-            placeholders = ','.join(['%s'] * len(instructor_ids))
-            cursor.execute(f"""
-                SELECT sia.instructor_id, sub.subject_code
-                FROM subject_instructor_assignments sia
-                JOIN subjects sub ON sia.subject_id = sub.id
-                WHERE sia.instructor_id IN ({placeholders})
-                ORDER BY sia.assignment_slot, sub.subject_code
-            """, tuple(instructor_ids))
-            for row in cursor.fetchall():
-                inst_id = int(row['instructor_id'])
-                code = (row['subject_code'] or '').strip().upper()
-                if not code:
-                    continue
-                self.instructor_subject_codes.setdefault(inst_id, set()).add(code)
-
-            cursor.execute(f"""
-                SELECT ism.instructor_id, s.specialization_name
-                FROM instructor_specializations ism
-                JOIN specializations s ON ism.specialization_id = s.id
-                WHERE ism.instructor_id IN ({placeholders})
-                ORDER BY ism.priority
-            """, tuple(instructor_ids))
-            for row in cursor.fetchall():
-                inst_id = int(row['instructor_id'])
-                code = (row['specialization_name'] or '').strip().upper()
-                if not code:
-                    continue
-                self.instructor_subject_codes.setdefault(inst_id, set()).add(code)
-
         self.job_instructor_subject_codes = {}
         raw_map = self.input_data.get('instructor_subject_map') or {}
         if isinstance(raw_map, dict):
@@ -189,6 +210,43 @@ class ScheduleGA:
                         if code:
                             cleaned.add(code)
                     self.job_instructor_subject_codes[inst_id] = cleaned
+
+        self.instructor_subject_codes = {
+            inst_id: set(codes)
+            for inst_id, codes in self.job_instructor_subject_codes.items()
+        }
+        self.job_has_explicit_instructor_subjects = bool(self.job_instructor_subject_codes)
+        instructor_ids = [int(inst['id']) for inst in self.input_data.get('instructors', [])]
+        missing_instructor_ids = [inst_id for inst_id in instructor_ids if inst_id not in self.job_instructor_subject_codes]
+        if missing_instructor_ids:
+            placeholders = ','.join(['%s'] * len(missing_instructor_ids))
+            cursor.execute(f"""
+                SELECT sia.instructor_id, sub.subject_code
+                FROM subject_instructor_assignments sia
+                JOIN subjects sub ON sia.subject_id = sub.id
+                WHERE sia.instructor_id IN ({placeholders})
+                ORDER BY sia.assignment_slot, sub.subject_code
+            """, tuple(missing_instructor_ids))
+            for row in cursor.fetchall():
+                inst_id = int(row['instructor_id'])
+                code = (row['subject_code'] or '').strip().upper()
+                if not code:
+                    continue
+                self.instructor_subject_codes.setdefault(inst_id, set()).add(code)
+
+            cursor.execute(f"""
+                SELECT ism.instructor_id, s.specialization_name
+                FROM instructor_specializations ism
+                JOIN specializations s ON ism.specialization_id = s.id
+                WHERE ism.instructor_id IN ({placeholders})
+                ORDER BY ism.priority
+            """, tuple(missing_instructor_ids))
+            for row in cursor.fetchall():
+                inst_id = int(row['instructor_id'])
+                code = (row['specialization_name'] or '').strip().upper()
+                if not code:
+                    continue
+                self.instructor_subject_codes.setdefault(inst_id, set()).add(code)
 
         # Time slots
         self.time_slots = self.input_data.get('time_slots', [])
@@ -226,7 +284,8 @@ class ScheduleGA:
         self._build_slot_indexes()
 
         # Availability, instructors, rooms, subjects, blocked times (unchanged logic)
-        default_slots = [ts['id'] for ts in self.time_slots if str(ts.get('day', '')).lower() != SATURDAY]
+        all_slot_ids = [int(ts['id']) for ts in self.time_slots]
+        default_slots = [int(ts['id']) for ts in self.time_slots if str(ts.get('day', '')).lower() != SATURDAY]
         self.availability = {}
         self.availability_windows = {}
         for inst in self.input_data['instructors']:
@@ -236,7 +295,7 @@ class ScheduleGA:
                 slots = [r['id'] for r in cursor.fetchall()]
                 self.availability[iid] = slots or default_slots
             else:
-                self.availability[iid] = [ts['id'] for ts in self.time_slots]
+                self.availability[iid] = list(all_slot_ids)
             self.availability_windows[iid] = self._build_windows_from_slot_ids(self.availability[iid])
 
         self.instructor_max_hours = {inst['id']: float(inst.get('max_hours_per_week', 20)) for inst in self.input_data['instructors']}
@@ -248,12 +307,20 @@ class ScheduleGA:
         self.subject_by_id = {s['id']: s for s in self.subjects}
         self.subject_has_both_kinds_by_id = {}
         self.subject_preferred_days_by_id = {}
+        self.subject_preferred_start_minutes_by_id = {}
+        self.subject_preferred_end_minutes_by_id = {}
         for subject in self.subjects:
             lecture_hours, lab_hours = self.get_subject_hour_breakdown(subject)
             self.subject_has_both_kinds_by_id[int(subject['id'])] = lecture_hours > 0 and lab_hours > 0
             preferred_days = self.parse_preferred_day_pair(subject.get('preferred_day_pair'))
             if preferred_days:
                 self.subject_preferred_days_by_id[int(subject['id'])] = preferred_days
+            preferred_start_minutes = self.parse_optional_time_to_minutes(subject.get('preferred_start_time'))
+            if preferred_start_minutes is not None:
+                self.subject_preferred_start_minutes_by_id[int(subject['id'])] = preferred_start_minutes
+            preferred_end_minutes = self.parse_optional_time_to_minutes(subject.get('preferred_end_time'))
+            if preferred_end_minutes is not None:
+                self.subject_preferred_end_minutes_by_id[int(subject['id'])] = preferred_end_minutes
         self.blocked_room_time = set()
         self.blocked_inst_time = set()
         self.blocked_room_intervals = {}
@@ -512,28 +579,42 @@ class ScheduleGA:
         gene_count = len(self.genes)
 
         # Auto-scale GA effort based on problem size.
-        if gene_count <= 20:
-            pop = 40
-            gens = 80
+        # Tuned from local run history:
+        # - small/medium jobs benefit from deeper exploration than before
+        # - larger jobs need a higher runtime cap but controlled population growth
+        if gene_count <= 12:
+            pop = 42
+            gens = 90
+            max_runtime_seconds = 600
         elif gene_count <= 30:
-            pop = 60
-            gens = 120
-        elif gene_count <= 80:
-            pop = 90
-            gens = 180
+            pop = 64
+            gens = 150
+            max_runtime_seconds = 900
+        elif gene_count <= 60:
+            pop = 84
+            gens = 200
+            max_runtime_seconds = 1050
+        elif gene_count <= 100:
+            pop = 96
+            gens = 230
+            max_runtime_seconds = 1200
         else:
-            pop = 120
-            gens = 240
+            pop = 108
+            gens = 260
+            max_runtime_seconds = 1350
 
-        mutation = DEFAULT_MUTATION_RATE
-        crossover = DEFAULT_CROSSOVER_RATE
-        elite = DEFAULT_ELITE_SIZE
-        # Use a sane default runtime cap so a difficult search does not run
-        # indefinitely when the job payload does not provide GA overrides.
-        max_runtime_seconds = 900
+        if gene_count <= 30:
+            mutation = 0.20
+        elif gene_count <= 60:
+            mutation = 0.22
+        else:
+            mutation = 0.24
+        crossover = 0.88
+        elite = 2 if pop < 90 else 3
 
         # Optional per-job overrides (backward compatible).
         ga_cfg = self.input_data.get('ga') or {}
+        runtime_override_provided = False
         if isinstance(ga_cfg, dict):
             try:
                 pop = int(ga_cfg.get('population_size', pop))
@@ -557,6 +638,7 @@ class ScheduleGA:
                 pass
             try:
                 max_runtime_seconds = int(ga_cfg.get('max_runtime_seconds', max_runtime_seconds))
+                runtime_override_provided = 'max_runtime_seconds' in ga_cfg
             except Exception:
                 pass
 
@@ -568,13 +650,26 @@ class ScheduleGA:
         self.elite_size = max(1, min(20, elite, self.population_size))
         self.max_runtime_seconds = max(0, min(1800, max_runtime_seconds))
 
-        # Paired-day mode is stricter; increase search effort automatically for larger problems.
-        if self.four_day_pattern and gene_count > 50:
-            # Keep paired-day mode slightly more robust, but do not silently
-            # blow past explicit per-job speed limits.
-            self.population_size = min(400, max(self.population_size, 80))
-            self.generations = min(1000, max(self.generations, 220))
-            self.mutation_rate = min(0.5, max(self.mutation_rate, 0.15))
+        # Paired-day mode is stricter; increase search effort and maintain diversity.
+        if self.four_day_pattern:
+            if gene_count <= 30:
+                self.population_size = min(400, max(self.population_size, 72))
+                self.generations = min(1000, max(self.generations, 180))
+            elif gene_count <= 80:
+                self.population_size = min(400, max(self.population_size, 90))
+                self.generations = min(1000, max(self.generations, 240))
+            else:
+                self.population_size = min(400, max(self.population_size, 102))
+                self.generations = min(1000, max(self.generations, 280))
+
+            strict_pair_mode = (self.preferred_day_mode == 'strict')
+            self.mutation_rate = min(0.5, max(self.mutation_rate, 0.22 if strict_pair_mode else 0.18))
+            self.elite_size = max(2, min(self.elite_size, self.population_size))
+
+            # Respect explicit runtime overrides, otherwise give strict mode more time.
+            if strict_pair_mode and not runtime_override_provided:
+                strict_runtime_floor = 1200 if gene_count <= 60 else 1500
+                self.max_runtime_seconds = max(self.max_runtime_seconds, strict_runtime_floor)
 
         print(
             "GA params => "
@@ -582,6 +677,48 @@ class ScheduleGA:
             f"mutation={self.mutation_rate:.3f}, crossover={self.crossover_rate:.3f}, "
             f"elite={self.elite_size}, max_runtime={self.max_runtime_seconds}s"
         )
+        self.fitness_cache_limit = max(2048, min(20000, self.population_size * 24))
+
+    def invalidate_fitness_cache(self):
+        self.fitness_cache = OrderedDict()
+
+    def get_individual_signature(self, individual):
+        signature_items = []
+        for entry in individual:
+            signature_items.append((
+                repr(self.get_gene_identity(entry)),
+                int(entry.get('instructor_id') or 0),
+                int(entry.get('room_id') or 0),
+                int(entry.get('time_slot_id') or 0),
+            ))
+        signature_items.sort()
+        return tuple(signature_items)
+
+    def get_partial_fitness_score(self, passed_entries, passed_sequence=0, passed_pair_checks=0, total_pair_checks=0):
+        total_genes = max(1, len(self.genes))
+        score = int((min(max(0, passed_entries), total_genes) * 86) / total_genes)
+
+        sequence_total = len(self.sequence_anchor_identities)
+        if sequence_total > 0:
+            score += int((min(max(0, passed_sequence), sequence_total) * 6) / sequence_total)
+
+        if total_pair_checks > 0:
+            score += int((min(max(0, passed_pair_checks), total_pair_checks) * 7) / total_pair_checks)
+
+        return max(0, min(99, int(score)))
+
+    def evaluate_individual(self, individual):
+        signature = self.get_individual_signature(individual)
+        cached = self.fitness_cache.get(signature)
+        if cached is not None:
+            self.fitness_cache.move_to_end(signature)
+            return cached
+
+        evaluation = self._evaluate_individual(individual)
+        self.fitness_cache[signature] = evaluation
+        if len(self.fitness_cache) > self.fitness_cache_limit:
+            self.fitness_cache.popitem(last=False)
+        return evaluation
 
     def precheck_feasibility(self):
         # Per-subject teachability and mandatory-load check:
@@ -706,6 +843,8 @@ class ScheduleGA:
                     )
             if wednesday_issues:
                 raise Exception("Wednesday policy issue: " + "; ".join(wednesday_issues))
+
+        self._raise_sequence_feasibility_issues()
 
     def get_subject_hours(self, subject_id):
         subject = self.subject_by_id.get(subject_id) or {}
@@ -848,6 +987,7 @@ class ScheduleGA:
             if active_instructor_id > 0:
                 instructor_subject_pair_key = (
                     active_instructor_id,
+                    str(entry_or_gene.get('section') or ''),
                     int(entry_or_gene.get('subject_id') or 0),
                     pair_group
                 )
@@ -861,13 +1001,18 @@ class ScheduleGA:
 
     def build_search_indexes(self):
         self.instructor_ids = [int(inst['id']) for inst in self.instructors]
+        if self.job_has_explicit_instructor_subjects:
+            self.active_instructor_ids = [iid for iid in self.instructor_ids if iid in self.job_instructor_subject_codes]
+        else:
+            self.active_instructor_ids = list(self.instructor_ids)
         self.subject_candidate_instructors = {}
         for subj in self.subjects:
             code = (subj.get('subject_code') or '').strip().upper()
-            candidates = [iid for iid in self.instructor_ids if self.can_teach_subject(iid, code)]
-            self.subject_candidate_instructors[code] = candidates or list(self.instructor_ids)
+            candidates = [iid for iid in self.active_instructor_ids if self.can_teach_subject(iid, code)]
+            self.subject_candidate_instructors[code] = candidates or list(self.active_instructor_ids)
         self.slot_order_cache = {}
         self.gene_sort_key_cache = {}
+        self.invalidate_fitness_cache()
 
         preferred_start_raw = str(self.input_data.get('constraints', {}).get('preferred_start_time') or '07:00').strip()
         if len(preferred_start_raw) == 5:
@@ -890,6 +1035,18 @@ class ScheduleGA:
             [int(slot_id) for slot_id in self.pair_anchor_slot_ids if not self.is_disallowed_slot(slot_id)],
             key=self.get_slot_priority_key
         )
+        self.anchor_slot_id_set = set(self.anchor_slot_ids_sorted)
+        self.primary_anchor_slot_ids_sorted = sorted(
+            [
+                int(slot_id) for slot_id in self.all_regular_slot_ids
+                if (
+                    str((self.get_slot(slot_id) or {}).get('day') or '').strip().lower() in self.non_mirror_days
+                    or int(slot_id) in self.anchor_slot_id_set
+                )
+            ],
+            key=self.get_slot_priority_key
+        )
+        self.primary_anchor_slot_id_set = set(self.primary_anchor_slot_ids_sorted)
         self.build_sequence_pair_indexes()
 
     def build_sequence_pair_indexes(self):
@@ -897,6 +1054,9 @@ class ScheduleGA:
         self.sequence_gene_by_identity = {}
         self.sequence_role_by_identity = {}
         self.sequence_anchor_identities = set()
+        self.sequence_pairs = []
+        self.sequence_relaxed_pairs = []
+        self.sequence_relaxed_pair_keys = set()
 
         grouped = {}
         for gene in self.genes:
@@ -912,7 +1072,9 @@ class ScheduleGA:
 
             lecture_gene = lecture_genes[0]
             lab_gene = lab_genes[0]
+            self.sequence_pairs.append((lecture_gene, lab_gene))
             if not self.has_feasible_sequence_slots(lecture_gene, lab_gene):
+                self.relax_sequence_pair(lecture_gene, lab_gene)
                 continue
 
             lecture_identity = self.get_gene_identity(lecture_gene)
@@ -922,6 +1084,46 @@ class ScheduleGA:
             self.sequence_role_by_identity[lecture_identity] = 'lecture'
             self.sequence_role_by_identity[lab_identity] = 'lab'
             self.sequence_anchor_identities.add(lecture_identity)
+
+    def relax_sequence_pair(self, lecture_gene, lab_gene):
+        lecture_identity = self.get_gene_identity(lecture_gene)
+        lab_identity = self.get_gene_identity(lab_gene)
+        pair_key = (lecture_identity, lab_identity)
+        if pair_key not in self.sequence_relaxed_pair_keys:
+            self.sequence_relaxed_pair_keys.add(pair_key)
+            self.sequence_relaxed_pairs.append((lecture_gene, lab_gene))
+
+        self.sequence_partner_by_identity.pop(lecture_identity, None)
+        self.sequence_partner_by_identity.pop(lab_identity, None)
+        self.sequence_role_by_identity.pop(lecture_identity, None)
+        self.sequence_role_by_identity.pop(lab_identity, None)
+        self.sequence_anchor_identities.discard(lecture_identity)
+
+    def get_sequence_pair_genes(self, gene_a, gene_b):
+        if not gene_a or not gene_b:
+            return None, None
+        if int(gene_a.get('subject_id') or 0) != int(gene_b.get('subject_id') or 0):
+            return None, None
+        if self.get_section_key(gene_a) != self.get_section_key(gene_b):
+            return None, None
+
+        kind_a = str(gene_a.get('meeting_kind') or 'lecture').strip().lower()
+        kind_b = str(gene_b.get('meeting_kind') or 'lecture').strip().lower()
+        if kind_a == 'lecture' and kind_b == 'lab':
+            return gene_a, gene_b
+        if kind_a == 'lab' and kind_b == 'lecture':
+            return gene_b, gene_a
+        return None, None
+
+    def is_relaxed_sequence_pair(self, gene_a, gene_b):
+        lecture_gene, lab_gene = self.get_sequence_pair_genes(gene_a, gene_b)
+        if lecture_gene is None or lab_gene is None:
+            return False
+        pair_key = (
+            self.get_gene_identity(lecture_gene),
+            self.get_gene_identity(lab_gene),
+        )
+        return pair_key in self.sequence_relaxed_pair_keys
 
     def has_feasible_sequence_slots(self, lecture_gene, lab_gene):
         for lecture_time in self.get_ordered_slot_ids_for_gene(lecture_gene):
@@ -935,6 +1137,359 @@ class ScheduleGA:
                 continue
             return True
         return False
+
+    def format_section_label(self, section_key):
+        try:
+            year_level, section_name = section_key
+        except Exception:
+            return str(section_key)
+        return f"year {year_level} section {section_name}"
+
+    def format_day_label(self, day):
+        text = str(day or '').strip().lower()
+        if not text:
+            return 'Unknown day'
+        return text.capitalize()
+
+    def format_interval_label(self, day, start_minutes, end_minutes):
+        return (
+            f"{self.format_day_label(day)} "
+            f"{self.minutes_to_time(int(start_minutes))[:5]}-{self.minutes_to_time(int(end_minutes))[:5]}"
+        )
+
+    def get_sequence_pair_slot_candidates(self, lecture_gene, lab_gene):
+        candidates = []
+        required_days = self.get_gene_required_days(lecture_gene)
+        empty_state = {'room_bookings': {}}
+
+        for lecture_time in self.get_ordered_slot_ids_for_gene(lecture_gene):
+            lecture_probe = dict(lecture_gene)
+            lecture_interval = self.get_entry_interval(lecture_probe, lecture_time)
+            if not lecture_interval:
+                continue
+            if required_days and lecture_interval['day'] not in required_days:
+                continue
+            if self.is_disallowed_slot(lecture_time):
+                continue
+            if not self.is_interval_within_windows(
+                lecture_interval['day'],
+                lecture_interval['start_minutes'],
+                lecture_interval['end_minutes'],
+                self.open_windows_by_day
+            ):
+                continue
+
+            lab_time = self.get_slot_id_by_day_and_start(lecture_interval['day'], lecture_interval['end_minutes'])
+            if lab_time is None or self.is_disallowed_slot(lab_time):
+                continue
+
+            lab_probe = dict(lab_gene)
+            lab_interval = self.get_entry_interval(lab_probe, lab_time)
+            if not lab_interval:
+                continue
+            if not self.is_interval_within_windows(
+                lab_interval['day'],
+                lab_interval['start_minutes'],
+                lab_interval['end_minutes'],
+                self.open_windows_by_day
+            ):
+                continue
+
+            lecture_room_ids = self.get_candidate_room_ids(dict(lecture_gene), lecture_time, empty_state)
+            lab_room_ids = self.get_candidate_room_ids(dict(lab_gene), lab_time, empty_state)
+            if not lecture_room_ids or not lab_room_ids:
+                continue
+
+            candidates.append({
+                'lecture_slot_id': int(lecture_time),
+                'lab_slot_id': int(lab_time),
+                'day': lecture_interval['day'],
+                'start_minutes': int(lecture_interval['start_minutes']),
+                'end_minutes': int(lab_interval['end_minutes']),
+            })
+
+        return candidates
+
+    def get_feasible_sequence_pair_placements(self, lecture_gene, lab_gene):
+        feasible = []
+        seen = set()
+        subject_code = str(lecture_gene.get('subject_code') or '').strip().upper()
+        lecture_minutes = self.get_gene_minutes(lecture_gene)
+        lab_minutes = self.get_gene_minutes(lab_gene)
+
+        for candidate in self.get_sequence_pair_slot_candidates(lecture_gene, lab_gene):
+            eligible_instructors = []
+            for instructor_id in self.subject_candidate_instructors.get(subject_code, []):
+                iid = int(instructor_id)
+                if not self.can_teach_subject(iid, subject_code):
+                    continue
+                if not self.is_interval_within_windows(
+                    candidate['day'],
+                    candidate['start_minutes'],
+                    candidate['start_minutes'] + lecture_minutes,
+                    self.availability_windows.get(iid, {})
+                ):
+                    continue
+                if not self.is_interval_within_windows(
+                    candidate['day'],
+                    candidate['end_minutes'] - lab_minutes,
+                    candidate['end_minutes'],
+                    self.availability_windows.get(iid, {})
+                ):
+                    continue
+                if (
+                    self.is_non_mirror_slot(candidate['lecture_slot_id'])
+                    or self.is_non_mirror_slot(candidate['lab_slot_id'])
+                ) and not (
+                    self.is_instructor_allowed_on_wednesday(iid, lecture_gene)
+                    and self.is_instructor_allowed_on_wednesday(iid, lab_gene)
+                ):
+                    continue
+                eligible_instructors.append(iid)
+
+            placement_key = (
+                candidate['day'],
+                candidate['start_minutes'],
+                candidate['end_minutes'],
+            )
+            if eligible_instructors and placement_key not in seen:
+                feasible.append({
+                    **candidate,
+                    'eligible_instructor_ids': eligible_instructors,
+                })
+                seen.add(placement_key)
+
+        return feasible
+
+    def can_assign_non_overlapping_sequence_pairs(self, section_pairs):
+        ordered_pairs = sorted(section_pairs, key=lambda item: len(item.get('placements') or []))
+        chosen = []
+
+        def backtrack(index):
+            if index >= len(ordered_pairs):
+                return True
+
+            for placement in ordered_pairs[index].get('placements') or []:
+                overlaps = any(
+                    self.intervals_overlap(
+                        placement['day'],
+                        placement['start_minutes'],
+                        placement['end_minutes'],
+                        existing['day'],
+                        existing['start_minutes'],
+                        existing['end_minutes'],
+                    )
+                    for existing in chosen
+                )
+                if overlaps:
+                    continue
+                chosen.append(placement)
+                if backtrack(index + 1):
+                    return True
+                chosen.pop()
+            return False
+
+        return backtrack(0)
+
+    def get_max_non_overlapping_sequence_pair_keys(self, section_pairs):
+        ordered_pairs = sorted(
+            section_pairs,
+            key=lambda item: (
+                len(item.get('placements') or []),
+                str(item.get('subject_code') or ''),
+            ),
+        )
+        chosen = []
+        best_pair_keys = set()
+
+        def backtrack(index):
+            nonlocal best_pair_keys
+            if len(chosen) + (len(ordered_pairs) - index) <= len(best_pair_keys):
+                return
+
+            if index >= len(ordered_pairs):
+                candidate_keys = {item['pair_key'] for item in chosen}
+                if len(candidate_keys) > len(best_pair_keys):
+                    best_pair_keys = candidate_keys
+                return
+
+            current = ordered_pairs[index]
+            for placement in current.get('placements') or []:
+                overlaps = any(
+                    self.intervals_overlap(
+                        placement['day'],
+                        placement['start_minutes'],
+                        placement['end_minutes'],
+                        existing['placement']['day'],
+                        existing['placement']['start_minutes'],
+                        existing['placement']['end_minutes'],
+                    )
+                    for existing in chosen
+                )
+                if overlaps:
+                    continue
+                chosen.append({
+                    'pair_key': current['pair_key'],
+                    'placement': placement,
+                })
+                backtrack(index + 1)
+                chosen.pop()
+
+            backtrack(index + 1)
+
+        backtrack(0)
+        return best_pair_keys
+
+    def _raise_sequence_feasibility_issues(self):
+        if not self.sequence_pairs:
+            return
+
+        pair_relax_warnings = []
+        section_pairs = {}
+
+        for lecture_gene, lab_gene in self.sequence_pairs:
+            section_key = self.get_section_key(lecture_gene)
+            subject_code = str(lecture_gene.get('subject_code') or f"subject#{lecture_gene.get('subject_id')}").strip()
+            raw_candidates = self.get_sequence_pair_slot_candidates(lecture_gene, lab_gene)
+            placements = self.get_feasible_sequence_pair_placements(lecture_gene, lab_gene)
+
+            if not placements:
+                subject_label = f"{subject_code} ({self.format_section_label(section_key)})"
+                if not raw_candidates:
+                    # No exact back-to-back window exists for this pair. In this
+                    # case we allow lecture and lab to be scheduled separately
+                    # instead of blocking the whole job up front.
+                    self.relax_sequence_pair(lecture_gene, lab_gene)
+                    continue
+                if raw_candidates:
+                    windows = ", ".join(
+                        self.format_interval_label(item['day'], item['start_minutes'], item['end_minutes'])
+                        for item in raw_candidates[:3]
+                    )
+                    has_non_mirror_candidate = any(
+                        self.is_non_mirror_slot(item['lecture_slot_id']) or self.is_non_mirror_slot(item['lab_slot_id'])
+                        for item in raw_candidates
+                    )
+                    if has_non_mirror_candidate:
+                        pair_relax_warnings.append(
+                            f"{subject_label} only fits consecutive lecture/lab windows at {windows}, but no selected instructor is allowed there under the Wednesday policy. Relaxing to allow non-consecutive placement."
+                        )
+                    else:
+                        pair_relax_warnings.append(
+                            f"{subject_label} has consecutive lecture/lab windows ({windows}), but none match the selected instructors' availability. Relaxing to allow non-consecutive placement."
+                        )
+                self.relax_sequence_pair(lecture_gene, lab_gene)
+                continue
+
+            section_pairs.setdefault(section_key, []).append({
+                'pair_key': (
+                    self.get_gene_identity(lecture_gene),
+                    self.get_gene_identity(lab_gene),
+                ),
+                'lecture_gene': lecture_gene,
+                'lab_gene': lab_gene,
+                'subject_code': subject_code,
+                'sole_instructor_id': (
+                    placements[0]['eligible_instructor_ids'][0]
+                    if placements
+                    and all(
+                        len(placement.get('eligible_instructor_ids') or []) == 1
+                        and placement['eligible_instructor_ids'][0] == (placements[0].get('eligible_instructor_ids') or [None])[0]
+                        for placement in placements
+                    )
+                    else None
+                ),
+                'placements': placements,
+            })
+
+        if pair_relax_warnings:
+            print("Sequence placement warning: " + "; ".join(pair_relax_warnings))
+
+        subject_relax_warnings = []
+        subject_instructor_groups = {}
+        for items in section_pairs.values():
+            for item in items:
+                sole_instructor_id = item.get('sole_instructor_id')
+                if sole_instructor_id is None:
+                    continue
+                subject_instructor_groups.setdefault(
+                    (str(item.get('subject_code') or ''), int(sole_instructor_id)),
+                    [],
+                ).append(item)
+
+        for (subject_code, instructor_id), items in sorted(subject_instructor_groups.items()):
+            if len(items) <= 1:
+                continue
+
+            unique_windows = {}
+            for item in items:
+                for placement in item.get('placements') or []:
+                    window_key = (
+                        placement['day'],
+                        placement['start_minutes'],
+                        placement['end_minutes'],
+                    )
+                    unique_windows[window_key] = self.format_interval_label(*window_key)
+
+            if len(unique_windows) >= len(items):
+                continue
+
+            for item in items:
+                self.relax_sequence_pair(item['lecture_gene'], item['lab_gene'])
+
+            instructor = self.instructor_by_id.get(int(instructor_id)) or {}
+            instructor_name = str(
+                instructor.get('full_name')
+                or instructor.get('name')
+                or f"instructor {instructor_id}"
+            ).strip()
+            windows_text = ", ".join(unique_windows[key] for key in sorted(unique_windows))
+            subject_relax_warnings.append(
+                f"{subject_code} has {len(items)} section pair(s) sharing only {len(unique_windows)} distinct consecutive window(s) for {instructor_name}: {windows_text}. Relaxing to allow non-consecutive placement."
+            )
+
+        if subject_relax_warnings:
+            print("Sequence instructor-capacity warning: " + "; ".join(subject_relax_warnings))
+
+        relaxed_section_issues = []
+        for section_key, items in sorted(section_pairs.items()):
+            items = [
+                item for item in items
+                if item['pair_key'] not in self.sequence_relaxed_pair_keys
+            ]
+            if not items:
+                continue
+            if self.can_assign_non_overlapping_sequence_pairs(items):
+                continue
+
+            unique_windows = {}
+            for item in items:
+                for placement in item.get('placements') or []:
+                    window_key = (
+                        placement['day'],
+                        placement['start_minutes'],
+                        placement['end_minutes'],
+                    )
+                    unique_windows[window_key] = self.format_interval_label(*window_key)
+
+            windows_text = ", ".join(unique_windows[key] for key in sorted(unique_windows))
+            strict_pair_keys = self.get_max_non_overlapping_sequence_pair_keys(items)
+            if len(strict_pair_keys) >= len(items):
+                continue
+
+            relaxed_items = list(items)
+            for item in relaxed_items:
+                self.relax_sequence_pair(item['lecture_gene'], item['lab_gene'])
+
+            relaxed_codes = ", ".join(sorted(item['subject_code'] for item in relaxed_items))
+            relaxed_section_issues.append(
+                f"{self.format_section_label(section_key)} needs {len(items)} lecture/lab pair placements, "
+                f"but only {len(unique_windows)} distinct non-overlapping consecutive window(s) are available: {windows_text}. "
+                f"Relaxing consecutive placement for: {relaxed_codes}"
+            )
+
+        if relaxed_section_issues:
+            print("Sequence capacity warning: " + "; ".join(relaxed_section_issues))
 
     def get_slot_priority_key(self, time_slot_id):
         slot = self.get_slot(time_slot_id) or {}
@@ -1008,7 +1563,14 @@ class ScheduleGA:
         # Exception 2: Only bar 'permanent'. Allow 'contractual', 'temporary', and others.
         return status not in ('permanent',)
 
+    def get_gene_required_days(self, gene):
+        if self.preferred_day_mode == 'strict':
+            return self.get_gene_preferred_days(gene)
+        return ()
+
     def get_gene_preferred_days(self, gene):
+        if self.is_pathfit_or_pe_subject(gene):
+            return ('wednesday',)
         if self.preferred_day_mode == 'none':
             return ()
         try:
@@ -1024,6 +1586,50 @@ class ScheduleGA:
         slot = self.get_slot(time_slot_id) or {}
         day = str(slot.get('_day') or slot.get('day') or '').strip().lower()
         return day in preferred_days
+
+    def get_gene_preferred_start_minutes(self, gene):
+        try:
+            subject_id = int(gene.get('subject_id') or 0)
+        except Exception:
+            return None
+        return self.subject_preferred_start_minutes_by_id.get(subject_id)
+
+    def get_gene_preferred_end_minutes(self, gene):
+        try:
+            subject_id = int(gene.get('subject_id') or 0)
+        except Exception:
+            return None
+        return self.subject_preferred_end_minutes_by_id.get(subject_id)
+
+    def get_gene_slot_priority_key(self, gene, time_slot_id, prefer_non_mirror=False):
+        slot = self.get_slot(time_slot_id) or {}
+        day = str(slot.get('_day') or slot.get('day') or '').strip().lower()
+        preferred_days = self.get_gene_preferred_days(gene)
+        start_minutes = slot.get('_start_minutes')
+        if start_minutes is None:
+            start_minutes = self.time_to_minutes(slot.get('start_time'))
+        end_minutes = slot.get('_end_minutes')
+        if end_minutes is None:
+            end_minutes = self.time_to_minutes(slot.get('end_time'))
+
+        subject_preferred_start = self.get_gene_preferred_start_minutes(gene)
+        subject_preferred_end = self.get_gene_preferred_end_minutes(gene)
+        target_start = self.preferred_start_minutes if subject_preferred_start is None else subject_preferred_start
+
+        window_penalty = 0
+        if subject_preferred_start is not None and subject_preferred_end is not None:
+            window_penalty = 0 if (start_minutes >= subject_preferred_start and end_minutes <= subject_preferred_end) else 1
+
+        return (
+            0 if (not prefer_non_mirror or int(time_slot_id) in self.non_mirror_slot_id_set) else 1,
+            0 if (not preferred_days or day in preferred_days) else 1,
+            window_penalty,
+            abs(int(start_minutes) - int(target_start)),
+            0 if subject_preferred_end is None else abs(int(end_minutes) - int(subject_preferred_end)),
+            self.day_priority.get(day, 99),
+            int(start_minutes),
+            int(time_slot_id),
+        )
 
     def get_ordered_slot_ids_for_gene(self, gene, prefer_non_mirror=False, anchor_only=False):
         cache_key = (
@@ -1056,7 +1662,33 @@ class ScheduleGA:
                 ordered = matching_slots
             else:
                 ordered = matching_slots + fallback_slots
+        ordered.sort(
+            key=lambda slot_id: self.get_gene_slot_priority_key(
+                gene,
+                slot_id,
+                prefer_non_mirror=(prefer_non_mirror and not anchor_only),
+            )
+        )
         self.slot_order_cache[cache_key] = list(ordered)
+        return ordered
+
+    def get_primary_anchor_slot_ids_for_gene(self, gene, paired_anchor_only=False):
+        base_slots = self.anchor_slot_ids_sorted if paired_anchor_only else self.primary_anchor_slot_ids_sorted
+        ordered = [int(slot_id) for slot_id in base_slots if self.get_entry_interval(gene, slot_id) is not None]
+        preferred_days = self.get_gene_preferred_days(gene)
+        if preferred_days:
+            matching_slots = []
+            fallback_slots = []
+            for slot_id in ordered:
+                if self.slot_matches_gene_preferred_days(gene, slot_id):
+                    matching_slots.append(slot_id)
+                else:
+                    fallback_slots.append(slot_id)
+            if self.preferred_day_mode == 'strict':
+                ordered = matching_slots
+            else:
+                ordered = matching_slots + fallback_slots
+        ordered.sort(key=lambda slot_id: self.get_gene_slot_priority_key(gene, slot_id))
         return ordered
 
     def get_gene_sort_key(self, gene):
@@ -1100,6 +1732,12 @@ class ScheduleGA:
             return (hours * 60) + minutes
         except Exception:
             return 0
+
+    def parse_optional_time_to_minutes(self, value):
+        text = str(value or '').strip()
+        if text == '':
+            return None
+        return self.time_to_minutes(text)
 
     def minutes_to_time(self, total_minutes):
         total_minutes = max(0, int(total_minutes))
@@ -1337,7 +1975,7 @@ class ScheduleGA:
             str(ts.get('end_time') or '')
         )
 
-    def get_instructor_subject_pair_key(self, instructor_id, subject_id, time_slot_id):
+    def get_instructor_subject_pair_key(self, instructor_id, section, subject_id, time_slot_id):
         if not self.four_day_pattern:
             return None
         ts = self.get_slot(time_slot_id)
@@ -1348,7 +1986,7 @@ class ScheduleGA:
         if not pair_info:
             return None
         _mirror_day, pair_group = pair_info
-        return (int(instructor_id), int(subject_id or 0), pair_group)
+        return (int(instructor_id), str(section or ''), int(subject_id or 0), pair_group)
 
     def get_section_key(self, entry_or_gene):
         if isinstance(entry_or_gene, dict) and entry_or_gene.get('_section_key') is not None:
@@ -1414,8 +2052,7 @@ class ScheduleGA:
             and int(lecture_interval['end_minutes']) == int(lab_interval['start_minutes'])
         )
 
-    def _try_place_sequence_pair_at_time(self, lecture_gene, lecture_time, state, attempts=24):
-        lab_gene = self.get_sequence_partner_gene(lecture_gene)
+    def _try_place_explicit_sequence_pair_at_time(self, lecture_gene, lab_gene, lecture_time, state, attempts=24):
         if not lab_gene:
             return None
 
@@ -1441,6 +2078,48 @@ class ScheduleGA:
             self._rollback_entry(lecture_entry, state)
             return None
         return lecture_entry, lab_entry
+
+    def _try_place_sequence_pair_at_time(self, lecture_gene, lecture_time, state, attempts=24):
+        lab_gene = self.get_sequence_partner_gene(lecture_gene)
+        return self._try_place_explicit_sequence_pair_at_time(
+            lecture_gene,
+            lab_gene,
+            lecture_time,
+            state,
+            attempts=attempts,
+        )
+
+    def try_place_relaxed_sequence_pair(self, gene_a, gene_b, state, pair_attempts=16, single_attempts=16):
+        lecture_gene, lab_gene = self.get_sequence_pair_genes(gene_a, gene_b)
+        if lecture_gene is None or lab_gene is None:
+            return False
+
+        for lecture_time in self.get_ordered_slot_ids_for_gene(lecture_gene):
+            pair_entries = self._try_place_explicit_sequence_pair_at_time(
+                lecture_gene,
+                lab_gene,
+                lecture_time,
+                state,
+                attempts=pair_attempts,
+            )
+            if pair_entries is not None:
+                return True
+
+        independent_entries = []
+        independent_genes = sorted((lecture_gene, lab_gene), key=self.get_gene_sort_key)
+        for gene in independent_genes:
+            placed_entry = None
+            for time_slot_id in self.get_ordered_slot_ids_for_gene(gene):
+                placed_entry = self._try_place_gene_at_time(gene, time_slot_id, state, attempts=single_attempts)
+                if placed_entry is not None:
+                    independent_entries.append(placed_entry)
+                    break
+            if placed_entry is None:
+                for entry in reversed(independent_entries):
+                    self._rollback_entry(entry, state)
+                return False
+
+        return True
 
     def group_entries_by_identity(self, individual):
         grouped = {}
@@ -1502,7 +2181,12 @@ class ScheduleGA:
             'subject_id': gene['subject_id'],
             'time_slot_id': time
         })
-        instructor_subject_pair_key = self.get_instructor_subject_pair_key(instructor, gene['subject_id'], time)
+        instructor_subject_pair_key = self.get_instructor_subject_pair_key(
+            instructor,
+            gene.get('section'),
+            gene['subject_id'],
+            time,
+        )
 
         if not self.can_teach_subject(instructor, gene['subject_code']):
             return False
@@ -1510,10 +2194,9 @@ class ScheduleGA:
             return False
         if self.is_non_mirror_slot(time) and not self.is_instructor_allowed_on_wednesday(instructor, gene):
             return False
-        if self.preferred_day_mode == 'strict':
-            preferred_days = self.get_gene_preferred_days(gene)
-            if preferred_days and candidate_interval['day'] not in preferred_days:
-                return False
+        required_days = self.get_gene_required_days(gene)
+        if required_days and candidate_interval['day'] not in required_days:
+            return False
         if self.overlaps_hard_break(candidate_interval['day'], candidate_interval['start_minutes'], candidate_interval['end_minutes']):
             return False
         if not self.is_interval_within_windows(candidate_interval['day'], candidate_interval['start_minutes'], candidate_interval['end_minutes'], self.open_windows_by_day):
@@ -1541,9 +2224,8 @@ class ScheduleGA:
             existing_instructor = state['paired_subject_instructor'].get(pair_subject_slot_key)
             if existing_instructor is not None and int(existing_instructor) != int(instructor):
                 return False
-            existing_room = state['paired_subject_room'].get(pair_subject_slot_key)
-            if existing_room is not None and int(existing_room) != int(room):
-                return False
+            # Mirror policy: instructor/time alignment is strict, but room identity
+            # may differ across mirrored days as long as room compatibility passes.
         if instructor_subject_pair_key is not None:
             existing_time = state.get('instructor_subject_pair_time', {}).get(instructor_subject_pair_key)
             candidate_time = (int(candidate_interval['start_minutes']), int(candidate_interval['end_minutes']))
@@ -1756,6 +2438,98 @@ class ScheduleGA:
                 return self._commit_entry(gene, instructor, room, time, state)
         return None
 
+    def _try_place_mirror_gene_from_anchor_entry(self, anchor_entry, mirror_gene, state):
+        anchor_time = int(anchor_entry.get('time_slot_id') or 0)
+        mirror_time = self.paired_slot_map.get(anchor_time)
+        if mirror_time is None:
+            return None
+        if self.get_entry_interval(mirror_gene, mirror_time) is None:
+            return None
+
+        instructor = int(anchor_entry.get('instructor_id') or 0)
+        if instructor <= 0:
+            return None
+
+        anchor_room = int(anchor_entry.get('room_id') or 0)
+        mirror_rooms = [int(room_id) for room_id in self.get_candidate_room_ids(mirror_gene, mirror_time, state)]
+        if not mirror_rooms:
+            return None
+
+        preferred_mirror_rooms = []
+        if anchor_room in mirror_rooms:
+            preferred_mirror_rooms.append(anchor_room)
+        alternate_mirror_rooms = [room_id for room_id in mirror_rooms if room_id != anchor_room]
+        random.shuffle(alternate_mirror_rooms)
+        mirror_room_order = preferred_mirror_rooms + alternate_mirror_rooms
+
+        for mirror_room in mirror_room_order:
+            if not self._can_place_entry(mirror_gene, instructor, mirror_room, mirror_time, state):
+                continue
+            return self._commit_entry(mirror_gene, instructor, mirror_room, mirror_time, state)
+        return None
+
+    def _try_place_anchor_then_mirror_pair(self, anchor_gene, mirror_gene, state, attempts=24):
+        anchor_slots = self.get_primary_anchor_slot_ids_for_gene(anchor_gene, paired_anchor_only=True)
+        if not anchor_slots:
+            return None
+
+        for anchor_time in anchor_slots[:max(1, attempts * 2)]:
+            anchor_entry = self._try_place_gene_at_time(anchor_gene, anchor_time, state, attempts=attempts)
+            if anchor_entry is None:
+                continue
+            mirror_entry = self._try_place_mirror_gene_from_anchor_entry(anchor_entry, mirror_gene, state)
+            if mirror_entry is not None:
+                return anchor_entry, mirror_entry
+            self._rollback_entry(anchor_entry, state)
+        return None
+
+    def _try_place_mirrored_gene_pair_at_anchor_time(self, anchor_gene, mirror_gene, anchor_time, state, attempts=24):
+        mirror_time = self.paired_slot_map.get(int(anchor_time))
+        if mirror_time is None:
+            return None
+        if self.get_entry_interval(anchor_gene, anchor_time) is None:
+            return None
+        if self.get_entry_interval(mirror_gene, mirror_time) is None:
+            return None
+
+        subject_code = str(anchor_gene.get('subject_code') or '').strip().upper()
+        candidate_instructors = list(self.subject_candidate_instructors.get(subject_code, self.instructor_ids))
+        random.shuffle(candidate_instructors)
+        candidate_instructors.sort(
+            key=lambda iid: (
+                float(state.get('used_inst_hours', {}).get(int(iid), 0.0)),
+                -float(self.instructor_max_hours.get(int(iid), 20.0)),
+                int(iid),
+            )
+        )
+
+        anchor_rooms = self.get_candidate_room_ids(anchor_gene, anchor_time, state)
+        if not anchor_rooms:
+            return None
+
+        attempt_limit = max(1, attempts * max(1, len(candidate_instructors)))
+        attempt_count = 0
+
+        for instructor in candidate_instructors:
+            shuffled_anchor_rooms = list(anchor_rooms)
+            random.shuffle(shuffled_anchor_rooms)
+
+            for anchor_room in shuffled_anchor_rooms:
+                attempt_count += 1
+                if attempt_count > attempt_limit:
+                    return None
+                if not self._can_place_entry(anchor_gene, instructor, anchor_room, anchor_time, state):
+                    continue
+
+                anchor_entry = self._commit_entry(anchor_gene, instructor, anchor_room, anchor_time, state)
+                mirror_entry = self._try_place_mirror_gene_from_anchor_entry(anchor_entry, mirror_gene, state)
+                if mirror_entry is not None:
+                    return anchor_entry, mirror_entry
+
+                self._rollback_entry(anchor_entry, state)
+
+        return None
+
     def build_state_from_individual(self, individual):
         state = {
             'individual': [],
@@ -1810,8 +2584,71 @@ class ScheduleGA:
 
             random.shuffle(missing_genes)
             missing_genes.sort(key=self.get_gene_sort_key)
+            consumed_gene_keys = set()
+
+            if self.four_day_pattern:
+                grouped_missing = {}
+                for gene in missing_genes:
+                    grouped_missing.setdefault((self.get_section_key(gene), int(gene['subject_id'])), []).append(gene)
+
+                for genes in grouped_missing.values():
+                    random.shuffle(genes)
+                    genes.sort(key=self.get_gene_sort_key)
+                    idx = 0
+                    while idx + 1 < len(genes):
+                        g1 = genes[idx]
+                        g2 = genes[idx + 1]
+                        if self.is_relaxed_sequence_pair(g1, g2):
+                            if self.try_place_relaxed_sequence_pair(g1, g2, state, pair_attempts=24, single_attempts=24):
+                                consumed_gene_keys.add(int(g1.get('_gene_key')))
+                                consumed_gene_keys.add(int(g2.get('_gene_key')))
+                                placed_counts = Counter(self.get_gene_identity(entry) for entry in state.get('individual', []))
+                                progress_made = True
+                            idx += 2
+                            continue
+                        if (
+                            self.get_sequence_role(g1) == 'lecture'
+                            and self.get_gene_identity(self.get_sequence_partner_gene(g1) or {}) == self.get_gene_identity(g2)
+                        ):
+                            lecture_pair_placed = False
+                            for lecture_time in self.get_primary_anchor_slot_ids_for_gene(g1):
+                                pair_entries = self._try_place_sequence_pair_at_time(g1, lecture_time, state, attempts=24)
+                                if pair_entries is not None:
+                                    consumed_gene_keys.add(int(g1.get('_gene_key')))
+                                    consumed_gene_keys.add(int(g2.get('_gene_key')))
+                                    placed_counts = Counter(self.get_gene_identity(entry) for entry in state.get('individual', []))
+                                    progress_made = True
+                                    lecture_pair_placed = True
+                                    break
+                            if lecture_pair_placed:
+                                idx += 2
+                                continue
+                            idx += 2
+                            continue
+
+                        paired_entries = self._try_place_anchor_then_mirror_pair(g1, g2, state, attempts=24)
+                        if paired_entries is not None:
+                            consumed_gene_keys.add(int(g1.get('_gene_key')))
+                            consumed_gene_keys.add(int(g2.get('_gene_key')))
+                            placed_counts = Counter(self.get_gene_identity(entry) for entry in state.get('individual', []))
+                            progress_made = True
+                        idx += 2
+
             for gene in missing_genes:
-                candidate_slots = self.get_ordered_slot_ids_for_gene(gene)
+                if int(gene.get('_gene_key') or -1) in consumed_gene_keys:
+                    continue
+                if self.four_day_pattern:
+                    candidate_slots = self.get_primary_anchor_slot_ids_for_gene(gene)
+                    fallback_slots = []
+                    if self.allow_non_mirror_fallback:
+                        fallback_slots = [
+                            slot_id
+                            for slot_id in self.get_ordered_slot_ids_for_gene(gene)
+                            if slot_id not in set(candidate_slots)
+                        ]
+                else:
+                    candidate_slots = self.get_ordered_slot_ids_for_gene(gene)
+                    fallback_slots = []
                 placed_entry = None
                 for time_slot_id in candidate_slots:
                     placed_entry = self._try_place_gene_at_time(gene, time_slot_id, state, attempts=32)
@@ -1819,6 +2656,13 @@ class ScheduleGA:
                         placed_counts = Counter(self.get_gene_identity(entry) for entry in state.get('individual', []))
                         progress_made = True
                         break
+                if placed_entry is None and fallback_slots:
+                    for time_slot_id in fallback_slots:
+                        placed_entry = self._try_place_gene_at_time(gene, time_slot_id, state, attempts=32)
+                        if placed_entry is not None:
+                            placed_counts = Counter(self.get_gene_identity(entry) for entry in state.get('individual', []))
+                            progress_made = True
+                            break
 
             if not progress_made:
                 break
@@ -1861,8 +2705,9 @@ class ScheduleGA:
             self.repair_missing_genes(state, max_passes=8)
             return state['individual']
 
-        # Pair-aware initialization:
-        # Build subject+section groups and place paired meetings (Mon<->Thu or Tue<->Fri) together.
+        # Anchor-first paired-day initialization:
+        # build Monday/Tuesday/Wednesday anchors first, then mirror Monday->Thursday
+        # and Tuesday->Friday while keeping the same room when possible.
         grouped = {}
         for gene in self.genes:
             gkey = (self.get_section_key(gene), int(gene['subject_id']))
@@ -1876,7 +2721,6 @@ class ScheduleGA:
             key=lambda gkey: min(self.get_gene_sort_key(gene) for gene in grouped.get(gkey, [])) if grouped.get(gkey) else (999, 999, 999, 0, '', '', 0)
         )
 
-        anchor_slots = list(self.anchor_slot_ids_sorted)
         non_mirror_slots = list(self.non_mirror_slot_ids_sorted)
 
         # Ensure at least one non-mirror-day class per section (when enabled and slots exist).
@@ -1916,17 +2760,21 @@ class ScheduleGA:
             genes.sort(key=self.get_gene_sort_key)
             pairable_count = (len(genes) // 2) * 2
 
-            # Place paired genes first.
+            # Place paired genes from Monday/Tuesday anchors, then mirror them.
             idx = 0
             while idx < pairable_count:
                 g1 = genes[idx]
                 g2 = genes[idx + 1]
+                if self.is_relaxed_sequence_pair(g1, g2):
+                    self.try_place_relaxed_sequence_pair(g1, g2, state, pair_attempts=16, single_attempts=16)
+                    idx += 2
+                    continue
                 if (
                     self.get_sequence_role(g1) == 'lecture'
                     and self.get_gene_identity(self.get_sequence_partner_gene(g1) or {}) == self.get_gene_identity(g2)
                 ):
                     placed_pair = False
-                    for t1 in self.get_ordered_slot_ids_for_gene(g1):
+                    for t1 in self.get_primary_anchor_slot_ids_for_gene(g1):
                         pair_entries = self._try_place_sequence_pair_at_time(g1, t1, state, attempts=16)
                         if pair_entries is not None:
                             placed_pair = True
@@ -1935,55 +2783,44 @@ class ScheduleGA:
                     if placed_pair:
                         continue
 
-                placed_pair = False
-
-                pair_anchor_candidates = [
-                    t1 for t1 in self.get_ordered_slot_ids_for_gene(g1, anchor_only=True)
-                    if (t2 := self.paired_slot_map.get(t1)) is not None
-                    and self.get_entry_interval(g2, t2) is not None
-                ]
-                if not pair_anchor_candidates:
-                    pair_anchor_candidates = anchor_slots
-
-                for t1 in pair_anchor_candidates[:24]:
-                    t2 = self.paired_slot_map.get(t1)
-                    if not t2:
-                        continue
-
-                    e1 = self._try_place_gene_at_time(g1, t1, state, attempts=16)
-                    if e1 is None:
-                        continue
-                    e2 = self._try_place_gene_at_time(g2, t2, state, attempts=16)
-                    if e2 is None:
-                        self._rollback_entry(e1, state)
-                        continue
-
-                    placed_pair = True
-                    break
+                placed_pair = self._try_place_anchor_then_mirror_pair(g1, g2, state, attempts=16) is not None
 
                 if not placed_pair:
-                    # Fallback: random placement (may be repaired later by GA/mutation).
-                    for g in (g1, g2):
-                        placed = None
-                        fallback_slots = self.get_ordered_slot_ids_for_gene(g)
-                        for t in fallback_slots:
-                            placed = self._try_place_gene_at_time(g, t, state, attempts=8)
-                            if placed is not None:
+                    # Soft fallback: when anchor copying is infeasible, allow a
+                    # best-effort non-anchor placement so later repair/restarts
+                    # still have something to work with.
+                    if self.allow_non_mirror_fallback:
+                        for g in (g1, g2):
+                            placed = None
+                            fallback_slots = self.get_ordered_slot_ids_for_gene(g)
+                            for t in fallback_slots:
+                                placed = self._try_place_gene_at_time(g, t, state, attempts=8)
+                                if placed is not None:
+                                    break
+                            if placed is None:
                                 break
-                        if placed is None:
-                            break
 
                 idx += 2
 
-            # If odd count, place one extra (prefer non-mirror day to avoid pair imbalance).
+            # If odd count, place one extra on the anchor days first.
             if len(genes) % 2 == 1:
                 extra = genes[-1]
                 placed_extra = None
-                candidate_slots = self.get_ordered_slot_ids_for_gene(extra, prefer_non_mirror=bool(non_mirror_slots))
+                candidate_slots = self.get_primary_anchor_slot_ids_for_gene(extra)
                 for t in candidate_slots:
                     placed_extra = self._try_place_gene_at_time(extra, t, state, attempts=12)
                     if placed_extra is not None:
                         break
+                if placed_extra is None and self.allow_non_mirror_fallback:
+                    fallback_slots = [
+                        slot_id
+                        for slot_id in self.get_ordered_slot_ids_for_gene(extra, prefer_non_mirror=bool(non_mirror_slots))
+                        if slot_id not in set(candidate_slots)
+                    ]
+                    for t in fallback_slots:
+                        placed_extra = self._try_place_gene_at_time(extra, t, state, attempts=12)
+                        if placed_extra is not None:
+                            break
 
         self.repair_missing_genes(state, max_passes=4)
         return state['individual']
@@ -2002,12 +2839,12 @@ class ScheduleGA:
                 last_reported_percent = init_percent
         return population
 
-    # ================= FITNESS (HARD CONSTRAINT) =================
-    def calculate_fitness(self, individual):
+    # ================= FITNESS =================
+    def _evaluate_individual(self, individual):
         if len(individual) != len(self.genes):
-            return 0
+            return 0, False
         if Counter(self.get_gene_identity(entry) for entry in individual) != self.target_gene_counter:
-            return 0
+            return 0, False
 
         room_bookings = {}
         inst_bookings = {}
@@ -2015,7 +2852,6 @@ class ScheduleGA:
         used_inst_hours = {}
         used_pair_subject = {}
         paired_subject_instructor = {}
-        paired_subject_room = {}
         instructor_subject_pair_time = {}
         wednesday_subject_per_section = {}
         non_wednesday_subjects_per_section = {}
@@ -2023,18 +2859,21 @@ class ScheduleGA:
         used_wed_sections = set()
         pair_alignment_counter = {}
         pair_instructor_counter = {}
-        pair_room_counter = {}
         entry_by_identity = {}
         required_sections = set(self.required_wed_sections)
         non_mirror_slots_exist = any(len(self.day_slot_ids.get(day, [])) > 0 for day in self.non_mirror_days)
+        passed_entries = 0
+        passed_sequence = 0
+        passed_pair_checks = 0
+        total_pair_checks = 0
 
         for e in individual:
             self.prepare_entry_metadata(e, instructor_id=e.get('instructor_id'))
             interval = self.get_entry_interval(e)
             if not interval:
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.overlaps_hard_break(interval['day'], interval['start_minutes'], interval['end_minutes']):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             pair_key = e.get('_pair_bucket_key')
             align_key = e.get('_pair_alignment_key')
             pair_subject_slot_key = e.get('_pair_subject_slot_key')
@@ -2042,44 +2881,44 @@ class ScheduleGA:
             sec_key = self.get_section_key(e)
 
             if self.is_disallowed_slot(e['time_slot_id']):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if not self.is_interval_within_windows(interval['day'], interval['start_minutes'], interval['end_minutes'], self.open_windows_by_day):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.has_interval_conflict(room_bookings.get(int(e['room_id']), []), interval):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.has_interval_conflict(inst_bookings.get(int(e['instructor_id']), []), interval):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.has_interval_conflict(section_bookings.get(sec_key, []), interval):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.has_interval_conflict(self.blocked_room_intervals.get(int(e['room_id']), []), interval):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.has_interval_conflict(self.blocked_inst_intervals.get(int(e['instructor_id']), []), interval):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if not self.is_interval_within_windows(interval['day'], interval['start_minutes'], interval['end_minutes'], self.availability_windows.get(int(e['instructor_id']), {})):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if not self.can_teach_subject(e['instructor_id'], e['subject_code']):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if self.is_non_mirror_slot(e['time_slot_id']) and not self.is_instructor_allowed_on_wednesday(e['instructor_id'], e):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
+            required_days = self.get_gene_required_days(e)
+            if required_days and interval['day'] not in required_days:
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
 
             entry_hours = float(e.get('meeting_hours') or self.get_subject_hours(e['subject_id']))
             next_hours = used_inst_hours.get(e['instructor_id'], 0.0) + entry_hours
             if pair_key is not None:
                 existing_subject = used_pair_subject.get(pair_key)
                 if existing_subject is not None and int(existing_subject) != int(e['subject_id']):
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if pair_subject_slot_key is not None:
                 existing_instructor = paired_subject_instructor.get(pair_subject_slot_key)
                 if existing_instructor is not None and int(existing_instructor) != int(e['instructor_id']):
-                    return 0
-                existing_room = paired_subject_room.get(pair_subject_slot_key)
-                if existing_room is not None and int(existing_room) != int(e['room_id']):
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
             if instructor_subject_pair_key is not None:
                 existing_time = instructor_subject_pair_time.get(instructor_subject_pair_key)
                 candidate_time = (int(interval['start_minutes']), int(interval['end_minutes']))
                 if existing_time is not None and tuple(existing_time) != candidate_time:
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
 
             if self.four_day_pattern:
                 current_subj_id = int(e['subject_id'])
@@ -2088,15 +2927,15 @@ class ScheduleGA:
                     if current_subj_id not in wed_subject_list:
                         wed_subject_list.append(current_subj_id)
                     if len(wed_subject_list) > 2:
-                        return 0
+                        return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
                     if current_subj_id in non_wednesday_subjects_per_section.get(sec_key, set()):
-                        return 0
+                        return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
                     current_kind = str(e.get('meeting_kind') or 'lecture').strip().lower()
                     used_kinds = non_mirror_subject_kinds_per_section.get(sec_key, {}).get(current_subj_id, set())
                     if self.subject_has_both_kinds(current_subj_id) and current_kind in used_kinds:
-                        return 0
+                        return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
                 elif current_subj_id in wednesday_subject_per_section.get(sec_key, []):
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
 
             room_bookings.setdefault(int(e['room_id']), []).append(interval)
             inst_bookings.setdefault(int(e['instructor_id']), []).append(interval)
@@ -2106,7 +2945,6 @@ class ScheduleGA:
                 used_pair_subject[pair_key] = e['subject_id']
             if pair_subject_slot_key is not None:
                 paired_subject_instructor[pair_subject_slot_key] = e['instructor_id']
-                paired_subject_room[pair_subject_slot_key] = e['room_id']
             if instructor_subject_pair_key is not None:
                 instructor_subject_pair_time[instructor_subject_pair_key] = (
                     int(interval['start_minutes']),
@@ -2125,18 +2963,19 @@ class ScheduleGA:
             if pair_subject_slot_key is not None:
                 instr_key = pair_subject_slot_key + (interval['day'], int(e['instructor_id']))
                 pair_instructor_counter[instr_key] = pair_instructor_counter.get(instr_key, 0) + 1
-                room_key = pair_subject_slot_key + (interval['day'], int(e['room_id']))
-                pair_room_counter[room_key] = pair_room_counter.get(room_key, 0) + 1
             entry_by_identity[self.get_gene_identity(e)] = e
+            passed_entries += 1
 
         for lecture_identity in self.sequence_anchor_identities:
             lecture_entry = entry_by_identity.get(lecture_identity)
             lab_gene = self.sequence_partner_by_identity.get(lecture_identity)
             lab_entry = entry_by_identity.get(self.get_gene_identity(lab_gene)) if lab_gene is not None else None
             if not self.validate_sequence_pair(lecture_entry, lab_entry):
-                return 0
+                return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
+            passed_sequence += 1
 
         # Strict paired-day alignment using the selected mirror pairs.
+        # Room identity is intentionally not mirrored; day/time/instructor still are.
         if self.four_day_pattern:
             aggregate = {}
             for key, count in pair_alignment_counter.items():
@@ -2146,14 +2985,16 @@ class ScheduleGA:
                     aggregate[base] = {}
                 aggregate[base][day] = aggregate[base].get(day, 0) + count
 
+            total_pair_checks += len(aggregate)
             for base, day_counts in aggregate.items():
                 pair_group = base[4]
                 pair_days = self.pair_group_days.get(pair_group)
                 if not pair_days:
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
                 anchor_day, mirror_day = pair_days
                 if day_counts.get(anchor_day, 0) != day_counts.get(mirror_day, 0):
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
+                passed_pair_checks += 1
 
             instructor_aggregate = {}
             for key, count in pair_instructor_counter.items():
@@ -2163,39 +3004,30 @@ class ScheduleGA:
                     instructor_aggregate[base] = {}
                 instructor_aggregate[base][day] = instructor_aggregate[base].get(day, 0) + count
 
+            total_pair_checks += len(instructor_aggregate)
             for base, day_counts in instructor_aggregate.items():
                 pair_group = base[4]
                 pair_days = self.pair_group_days.get(pair_group)
                 if not pair_days:
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
                 anchor_day, mirror_day = pair_days
                 if day_counts.get(anchor_day, 0) != day_counts.get(mirror_day, 0):
-                    return 0
-
-            room_aggregate = {}
-            for key, count in pair_room_counter.items():
-                dep, year, sec, subj, pair_group, start, end, day, room_id = key
-                base = (dep, year, sec, subj, pair_group, start, end, room_id)
-                if base not in room_aggregate:
-                    room_aggregate[base] = {}
-                room_aggregate[base][day] = room_aggregate[base].get(day, 0) + count
-
-            for base, day_counts in room_aggregate.items():
-                pair_group = base[4]
-                pair_days = self.pair_group_days.get(pair_group)
-                if not pair_days:
-                    return 0
-                anchor_day, mirror_day = pair_days
-                if day_counts.get(anchor_day, 0) != day_counts.get(mirror_day, 0):
-                    return 0
+                    return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
+                passed_pair_checks += 1
 
             # Option 1: each section must have at least one non-mirror-day class.
             if non_mirror_slots_exist and required_sections:
+                total_pair_checks += len(required_sections)
                 for sec in required_sections:
                     if len(wednesday_subject_per_section.get(sec, [])) == 0:
-                        return 0
+                        return self.get_partial_fitness_score(passed_entries, passed_sequence, passed_pair_checks, total_pair_checks), False
+                    passed_pair_checks += 1
 
-        return 100
+        return 100, True
+
+    def calculate_fitness(self, individual):
+        score, _is_valid = self.evaluate_individual(individual)
+        return score
 
     # ================= SELECTION =================
     def selection(self, population, fitness):
@@ -2283,8 +3115,6 @@ class ScheduleGA:
                             if candidate_pair_subject_slot_key is not None and self.get_pair_subject_slot_key(other) == candidate_pair_subject_slot_key:
                                 if int(mutated[i].get('instructor_id') or 0) != int(other.get('instructor_id') or 0):
                                     conflict = True
-                                if int(new_room or 0) != int(other.get('room_id') or 0):
-                                    conflict = True
 
                         if not conflict and self.four_day_pattern:
                             sec_key_i = self.get_section_key(mutated[i])
@@ -2321,6 +3151,8 @@ class ScheduleGA:
         return rebuilt_state['individual']
 
     def can_teach_subject(self, instructor_id, subject_code):
+        if self.job_has_explicit_instructor_subjects and instructor_id not in self.job_instructor_subject_codes:
+            return False
         if instructor_id in self.job_instructor_subject_codes:
             selected_codes = self.job_instructor_subject_codes[instructor_id]
             return (subject_code or "").strip().upper() in selected_codes
@@ -2339,6 +3171,7 @@ class ScheduleGA:
         self.required_wed_sections = set()
         self.paired_slot_map = {}
         self.pair_anchor_slot_ids = []
+        self.invalidate_fitness_cache()
         self.configure_ga_parameters()
 
     def relax_instructor_availability(self):
@@ -2349,6 +3182,7 @@ class ScheduleGA:
             iid = int(inst['id'])
             self.availability[iid] = list(all_slot_ids)
             self.availability_windows[iid] = self._build_windows_from_slot_ids(self.availability[iid])
+        self.invalidate_fitness_cache()
 
     def relax_mirror_constraints(self):
         """
@@ -2373,13 +3207,19 @@ class ScheduleGA:
         best_fit = 0
         stagnation = 0
         stagnation_limit = 120 if self.four_day_pattern else 80
-        # Fail fast on dead search spaces, then let run() retry with a fresh/randomized population.
+        # Fail fast on dead search spaces only when we can safely fall back to
+        # a relaxed mode. For strict paired-day runs, allow much deeper search
+        # before declaring the population dead.
         if self.four_day_pattern and self.allow_non_mirror_fallback and not self.relaxed_mirror_mode:
-            # If we're allowed to fall back to a non-mirrored schedule, fail fast
-            # when strict mirror constraints produce zero feasible candidates.
-            zero_fitness_limit = 25
+            # We can relax mirror constraints later, so keep this conservative.
+            zero_fitness_limit = max(25, int(self.generations * 0.2))
+        elif self.four_day_pattern and self.preferred_day_mode == 'strict':
+            # Strict mirror mode has a smaller feasible space; avoid stopping at
+            # a fixed low threshold (for example 50) when generations are higher.
+            zero_fitness_limit = max(120, int(self.generations * 0.75))
         else:
-            zero_fitness_limit = 50 if self.four_day_pattern else 35
+            zero_fitness_limit = max(45, int(self.generations * 0.4))
+        zero_fitness_limit = min(self.generations, max(1, zero_fitness_limit))
 
         for gen in range(self.generations):
             if self.max_runtime_seconds > 0 and self.run_started_at is not None and (time.monotonic() - self.run_started_at) >= self.max_runtime_seconds:
@@ -2387,7 +3227,9 @@ class ScheduleGA:
                 print(f"Early stop: {self.stop_reason}")
                 break
 
-            fitness = [self.calculate_fitness(ind) for ind in population]
+            evaluations = [self.evaluate_individual(ind) for ind in population]
+            fitness = [score for score, _is_valid in evaluations]
+            valid_count = sum(1 for _score, is_valid in evaluations if is_valid)
             gen_best = max(fitness)
             progress_percent = min(99, max(21, 20 + int(((gen + 1) / max(1, self.generations)) * 79)))
             # Batch progress updates to reduce DB overhead while keeping UI responsive.
@@ -2406,16 +3248,15 @@ class ScheduleGA:
             else:
                 stagnation += 1
 
-            print(f"Generation {gen} | Best Fitness: {gen_best}")
+            print(f"Generation {gen} | Best Fitness: {gen_best} | Valid: {valid_count}")
 
             if best_fit == 100:
                 break
 
-            # If we still have not found a single valid individual after many
-            # generations, the current search mode is likely too restrictive.
-            # Breaking early lets `run()` fall back sooner instead of burning
-            # tens of minutes on the same dead search space.
-            if best_fit == 0 and (gen + 1) >= zero_fitness_limit:
+            # Partial fitness now distinguishes promising candidates from truly
+            # dead search spaces. Only stop early when we still have no valid
+            # schedules and the best candidate never clears the viability floor.
+            if valid_count == 0 and best_fit < self.partial_fitness_viable_threshold and (gen + 1) >= zero_fitness_limit:
                 self.stop_reason = (
                     f"no valid candidate found after {zero_fitness_limit} generations"
                 )
@@ -2455,7 +3296,6 @@ class ScheduleGA:
             self.four_day_pattern
             and self.allow_non_mirror_fallback
             and not self.relaxed_mirror_mode
-            and best_fit == 0
             and self.stop_reason is not None
             and "no valid candidate found" in str(self.stop_reason).lower()
         ):
@@ -2463,8 +3303,14 @@ class ScheduleGA:
 
         # Additional randomized restarts improve success without keeping a dead run alive too long.
         if not best or best_fit < 100:
-            for restart_idx in range(2):
+            restart_attempts = 4 if (self.four_day_pattern and self.preferred_day_mode == 'strict') else 2
+            base_mutation = self.mutation_rate
+            for restart_idx in range(restart_attempts):
                 print(f"Retrying schedule search with randomized restart #{restart_idx + 1}.")
+                # Nudge mutation upward per restart in strict mode to escape
+                # dead neighborhoods while keeping the first restart unchanged.
+                if self.four_day_pattern and self.preferred_day_mode == 'strict':
+                    self.mutation_rate = min(0.5, base_mutation + (0.04 * restart_idx))
                 self.run_started_at = time.monotonic()
                 self.stop_reason = None
                 self.update_progress(5, generation=0, total_generations=self.generations, best_fit=best_fit)
@@ -2474,6 +3320,7 @@ class ScheduleGA:
                     best, best_fit = retry_best, retry_best_fit
                 if best_fit >= 100:
                     break
+            self.mutation_rate = base_mutation
 
         used_relaxed_availability = False
         if (not best or best_fit < 100) and self.respect_availability:
@@ -2544,6 +3391,12 @@ class ScheduleGA:
             self.update_job_status('completed')
             self.update_progress(100, generation=self.generations, total_generations=self.generations, best_fit=best_fit)
             return best
+        except Exception as exc:
+            try:
+                self.update_job_status('failed', str(exc) or 'Schedule generation failed.')
+            except Exception:
+                pass
+            raise
         finally:
             self._close_job_conn()
 
@@ -2683,7 +3536,7 @@ class ScheduleGA:
 
         now_ts = time.monotonic()
         # Throttle progress writes to the DB (except final completion-like updates).
-        if percent < 100 and (now_ts - self.last_progress_write_at) < 0.6:
+        if percent < 100 and (now_ts - self.last_progress_write_at) < PROGRESS_DB_WRITE_THROTTLE_SECONDS:
             return
 
         self.last_progress_percent = percent
@@ -2738,12 +3591,7 @@ if __name__ == "__main__":
         # Best-effort: persist failure message to schedule_jobs for UI visibility.
         if job_id is not None:
             try:
-                db_config = {
-                    'host': 'localhost',
-                    'user': 'root',
-                    'password': '',
-                    'database': 'academic_scheduling'
-                }
+                db_config = build_db_config()
                 conn = mysql.connector.connect(**db_config)
                 cursor = conn.cursor()
                 cursor.execute("""

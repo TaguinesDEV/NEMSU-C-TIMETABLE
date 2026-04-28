@@ -1654,6 +1654,95 @@ transform:scale(1.05);
 opacity:0.9;
 }
 
+.dashboard-section-header{
+margin-bottom:12px;
+}
+
+.dashboard-section-meta{
+color:#64748b;
+font-size:14px;
+margin:0;
+}
+
+.dashboard-toggle-btn{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 24px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+    background: linear-gradient(135deg, #6366f1, #3b82f6);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    cursor: pointer;
+    box-shadow: 0 8px 20px rgba(59, 130, 246, 0.25);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dashboard-toggle-btn:hover{
+    transform: translateY(-2px);
+    box-shadow: 0 12px 28px rgba(59, 130, 246, 0.35);
+    filter: brightness(1.08);
+}
+
+.dashboard-toggle-btn:focus{
+    outline: none;
+    box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.3);
+}
+
+.dashboard-toggle-btn::after {
+    content: '▼';
+    margin-left: 10px;
+    font-size: 10px;
+    transition: transform 0.3s ease;
+}
+
+.dashboard-toggle-btn[aria-expanded="true"]{
+    background: linear-gradient(135deg, #10b981, #059669);
+    box-shadow: 0 8px 20px rgba(16, 185, 129, 0.25);
+}
+
+.dashboard-toggle-btn[aria-expanded="true"]::after {
+    transform: rotate(180deg);
+}
+
+.dashboard-table-panel{
+overflow:hidden;
+max-height:var(--collapsed-height, none);
+transition:max-height .38s ease, box-shadow .25s ease;
+border-radius:12px;
+}
+
+.recent-jobs.is-expanded .dashboard-table-panel{
+max-height:none;
+overflow:visible;
+}
+
+.dashboard-table-footer{
+display:flex;
+justify-content:space-between;
+align-items:center;
+gap:14px;
+flex-wrap:wrap;
+margin-top:14px;
+}
+
+.recent-jobs .data-table{
+margin-top:0;
+}
+
+@media (max-width: 768px){
+.dashboard-table-footer{
+align-items:flex-start;
+}
+
+.dashboard-toggle-btn{
+width:100%;
+}
+}
+
 /* =====================================================
    EDIT INSTRUCTOR FORM ALIGNMENT
    ===================================================== */
@@ -1718,8 +1807,12 @@ margin-top:10px;
 /* modal box */
 
 .modal-content{
-width:900px;
-max-width:98%;
+width:780px;
+max-width:95%;
+padding:30px 35px;
+display:flex;
+flex-direction:column;
+gap:20px;
 }
 
 @media (max-width: 960px) {
@@ -1729,11 +1822,6 @@ max-width:98%;
     .modal-content form {
         grid-template-columns: 1fr;
     }
-}
-padding:35px 40px;
-display:flex;
-flex-direction:column;
-gap:20px;
 }
 
 /* title */

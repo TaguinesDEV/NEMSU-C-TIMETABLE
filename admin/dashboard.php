@@ -4,6 +4,44 @@ requireAdmin();
 
 $pdo = getDB();
 
+/* =========================================
+   AJAX Handler for smoother actions
+========================================= */
+if (isset($_GET['ajax_action'])) {
+    header('Content-Type: application/json');
+    $res = ['success' => false, 'message' => ''];
+    
+    try {
+        if ($_GET['ajax_action'] === 'save_job' && isset($_GET['job_id'])) {
+            $payload = buildJobBackupPayload($pdo, (int)$_GET['job_id']);
+            if ($payload) {
+                $stmt = $pdo->prepare("INSERT INTO saved_schedule_backups (original_job_id, job_name, created_by, program_id, saved_by, job_data, schedules_data) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE job_name = VALUES(job_name), created_by = VALUES(created_by), job_data = VALUES(job_data), schedules_data = VALUES(schedules_data), saved_at = CURRENT_TIMESTAMP");
+                $stmt->execute([$payload['job']['id'], $payload['job']['job_name'], $payload['job']['created_by'], $payload['job']['program_id'], $_SESSION['user_id'], json_encode($payload['job']), json_encode($payload['schedules'])]);
+                $res = ['success' => true, 'message' => 'Backup saved successfully.'];
+            }
+        } elseif ($_GET['ajax_action'] === 'delete_job' && isset($_GET['job_id'])) {
+            $stmt = $pdo->prepare("DELETE FROM schedule_jobs WHERE id = ?");
+            $stmt->execute([(int)$_GET['job_id']]);
+            $res = ['success' => true, 'message' => 'Job deleted.'];
+        } elseif ($_GET['ajax_action'] === 'delete_saved' && isset($_GET['backup_id'])) {
+            $stmt = $pdo->prepare("DELETE FROM saved_schedule_backups WHERE id = ?");
+            $stmt->execute([(int)$_GET['backup_id']]);
+            $res = ['success' => true, 'message' => 'Backup removed.'];
+        } elseif ($_GET['ajax_action'] === 'restore_saved' && isset($_GET['backup_id'])) {
+            $stmt = $pdo->prepare("SELECT * FROM saved_schedule_backups WHERE id = ?");
+            $stmt->execute([(int)$_GET['backup_id']]);
+            $backup = $stmt->fetch(PDO::FETCH_ASSOC);
+            if ($backup && restoreSavedBackup($pdo, $backup)) {
+                $res = ['success' => true, 'message' => 'Schedule restored.'];
+            }
+        }
+    } catch (Exception $e) {
+        $res['message'] = $e->getMessage();
+    }
+    echo json_encode($res);
+    exit;
+}
+
 try {
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS saved_schedule_backups (
@@ -210,7 +248,10 @@ $stats = [
     'schedules' => $pdo->query("SELECT COUNT(*) FROM schedules WHERE is_published = 1")->fetchColumn(),
     'pending_jobs' => $pdo->query("SELECT COUNT(*) FROM schedule_jobs WHERE status = 'pending'")->fetchColumn()
 ];
-$savedBackups = $pdo->query("SELECT * FROM saved_schedule_backups ORDER BY saved_at DESC LIMIT 5")->fetchAll(PDO::FETCH_ASSOC);
+
+// Fetch all records but we will handle the "See All" display via CSS/JS
+$jobs = $pdo->query("SELECT j.*, u.full_name as created_by_name FROM schedule_jobs j JOIN users u ON j.created_by = u.id ORDER BY j.created_at DESC")->fetchAll();
+$savedBackups = $pdo->query("SELECT * FROM saved_schedule_backups ORDER BY saved_at DESC")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -320,45 +361,64 @@ $savedBackups = $pdo->query("SELECT * FROM saved_schedule_backups ORDER BY saved
         </div>
         
         <div class="recent-jobs">
-            <h2>Recent Schedule Generation Jobs</h2>
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>Job Name</th>
-                        <th>Status</th>
-                        <th>Created</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php
-                    $jobs = $pdo->query("SELECT * FROM schedule_jobs ORDER BY created_at DESC LIMIT 5")->fetchAll();
-                    foreach ($jobs as $job):
-                    ?>
-                    <tr>
-                        <td><?php echo htmlspecialchars($job['job_name']); ?></td>
-                        <td>
-                            <span class="status-badge status-<?php echo $job['status']; ?>">
-                                <?php echo $job['status']; ?>
-                            </span>
-                        </td>
-                        <td><?php echo $job['created_at']; ?></td>
-                        <td>
-                            <a href="view_schedules.php?job_id=<?php echo $job['id']; ?>" class="btn-small">View</a>
-                            <a href="dashboard.php?save_job=<?php echo $job['id']; ?>" class="btn-small" onclick="return confirm('Save a recoverable backup of this schedule job?');">Save</a>
-                            <a href="dashboard.php?delete_job=<?php echo $job['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this job and all its generated schedules?');">Delete</a>
-                        </td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
+            <div class="dashboard-section-header">
+                <h2>Recent Schedule Generation Jobs</h2>
+                <div class="dashboard-table-footer">
+                    <p class="dashboard-section-meta">View and manage recently generated schedules.</p>
+                    <?php if (count($jobs) > 5): ?>
+                        <button type="button" class="dashboard-toggle-btn" id="toggleJobsBtn">See All Jobs</button>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+            <div class="dashboard-table-panel" id="jobsPanel" style="--collapsed-height: <?php echo (count($jobs) > 5) ? '380px' : 'none'; ?>;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Job Name</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if (empty($jobs)): ?>
+                            <tr><td colspan="4" class="no-data">No generation jobs found.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($jobs as $index => $job): ?>
+                            <tr id="job-row-<?php echo $job['id']; ?>"<?php echo $index >= 5 ? ' hidden' : ''; ?>>
+                                <td><?php echo htmlspecialchars($job['job_name']); ?></td>
+                                <td>
+                                    <span class="status-badge status-<?php echo $job['status']; ?>">
+                                        <?php echo $job['status']; ?>
+                                    </span>
+                                </td>
+                                <td><?php echo $job['created_at']; ?></td>
+                                <td>
+                                    <a href="view_schedules.php?job_id=<?php echo $job['id']; ?>" class="btn-small">View</a>
+                                    <button type="button" onclick="dashboardAction('save_job', {job_id: <?php echo $job['id']; ?>}, this)" class="btn-small">Save</button>
+                                    <button type="button" onclick="dashboardAction('delete_job', {job_id: <?php echo $job['id']; ?>}, this, true)" class="btn-small btn-danger">Delete</button>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <div class="recent-jobs">
-            <h2>Saved Schedule Backups</h2>
-            <?php if (empty($savedBackups)): ?>
-                <p class="no-data">No saved schedule backups yet.</p>
-            <?php else: ?>
+        <div class="recent-jobs" style="margin-top: 40px;">
+            <div class="dashboard-section-header">
+                <h2>Saved Schedule Backups</h2>
+                <div class="dashboard-table-footer">
+                    <p class="dashboard-section-meta">Recover or manage your saved schedule versions.</p>
+                    <?php if (count($savedBackups) > 5): ?>
+                        <button type="button" class="dashboard-toggle-btn" id="toggleBackupsBtn">See All Backups</button>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <div class="dashboard-table-panel" id="backupsPanel" style="--collapsed-height: <?php echo (count($savedBackups) > 5) ? '380px' : 'none'; ?>;">
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -368,20 +428,113 @@ $savedBackups = $pdo->query("SELECT * FROM saved_schedule_backups ORDER BY saved
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($savedBackups as $backup): ?>
-                        <tr>
-                            <td><?php echo htmlspecialchars($backup['job_name']); ?></td>
-                            <td><?php echo htmlspecialchars((string)$backup['saved_at']); ?></td>
-                            <td>
-                                <a href="dashboard.php?restore_saved=<?php echo (int)$backup['id']; ?>" class="btn-small" onclick="return confirm('Restore this saved schedule as a new job?');">Restore</a>
-                                <a href="dashboard.php?delete_saved=<?php echo (int)$backup['id']; ?>" class="btn-small btn-danger" onclick="return confirm('Delete this saved backup permanently?');">Delete</a>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
+                        <?php if (empty($savedBackups)): ?>
+                            <tr><td colspan="3" class="no-data">No saved schedule backups yet.</td></tr>
+                        <?php else: ?>
+                            <?php foreach ($savedBackups as $index => $backup): ?>
+                            <tr id="backup-row-<?php echo $backup['id']; ?>"<?php echo $index >= 5 ? ' hidden' : ''; ?>>
+                                <td><?php echo htmlspecialchars($backup['job_name']); ?></td>
+                                <td><?php echo htmlspecialchars((string)$backup['saved_at']); ?></td>
+                                <td>
+                                    <button type="button" onclick="dashboardAction('restore_saved', {backup_id: <?php echo $backup['id']; ?>}, this)" class="btn-small">Restore</button>
+                                    <button type="button" onclick="dashboardAction('delete_saved', {backup_id: <?php echo $backup['id']; ?>}, this, true)" class="btn-small btn-danger">Delete</button>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
                     </tbody>
                 </table>
-            <?php endif; ?>
+            </div>
         </div>
     </div>
+
+    <script>
+        async function dashboardAction(action, params, btn, askConfirm = false) {
+            if (askConfirm && !confirm('Are you sure you want to perform this action?')) return;
+
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '...';
+
+            const queryParams = new URLSearchParams({ ajax_action: action, ...params });
+            try {
+                const response = await fetch('dashboard.php?' + queryParams.toString());
+                const data = await response.json();
+
+                if (data.success) {
+                    btn.textContent = action.includes('save') ? 'Saved!' : (action.includes('restore') ? 'Restored!' : 'Done');
+                    if (action.includes('delete') || action.includes('restore')) {
+                        setTimeout(() => window.location.reload(), 1000);
+                    } else {
+                        setTimeout(() => { btn.disabled = false; btn.textContent = originalText; }, 2000);
+                    }
+                } else {
+                    alert('Error: ' + data.message);
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                }
+            } catch (e) {
+                console.error(e);
+                btn.disabled = false;
+                btn.textContent = originalText;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const dashboardSections = [
+                {
+                    section: document.querySelector('.recent-jobs'),
+                    buttonId: 'toggleJobsBtn',
+                    previewLabel: 'Jobs',
+                },
+                {
+                    section: document.querySelectorAll('.recent-jobs')[1],
+                    buttonId: 'toggleBackupsBtn',
+                    previewLabel: 'Backups',
+                },
+            ];
+
+            dashboardSections.forEach(({ section, buttonId, previewLabel }) => {
+                if (!section) return;
+
+                const button = document.getElementById(buttonId);
+                const table = section.querySelector('.dashboard-table-panel table');
+                const rows = table ? Array.from(table.querySelectorAll('tbody tr')).filter(row => !row.querySelector('.no-data')) : [];
+                const previewRows = 5;
+
+                if (!button || rows.length <= previewRows) {
+                    if (button) {
+                        button.hidden = true;
+                    }
+                    return;
+                }
+
+                const collapsedLabel = button.textContent.trim();
+                const expandedLabel = `Show Less ${previewLabel}`;
+
+                function setExpanded(expand) {
+                    section.classList.toggle('is-expanded', expand);
+                    button.textContent = expand ? expandedLabel : collapsedLabel;
+                    button.setAttribute('aria-expanded', expand ? 'true' : 'false');
+
+                    rows.forEach((row, index) => {
+                        row.hidden = !expand && index >= previewRows;
+                    });
+                }
+
+                button.addEventListener('click', () => {
+                    setExpanded(!section.classList.contains('is-expanded'));
+                });
+
+                setExpanded(false);
+            });
+
+            // Auto-hide success messages
+            const successMsg = document.querySelector('.success');
+            if (successMsg) {
+                setTimeout(() => { successMsg.style.display = 'none'; }, 5000);
+            }
+        });
+    </script>
 </body>
 </html>

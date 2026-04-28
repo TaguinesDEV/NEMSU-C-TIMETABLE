@@ -15,6 +15,18 @@ function h($value): string
     return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
+function isPathfitOrPeCode(string $subjectCode): bool
+{
+    $normalized = strtoupper(str_replace([' ', '-'], '', trim($subjectCode)));
+    if ($normalized === '') {
+        return false;
+    }
+    if (str_contains($normalized, 'PATHFIT')) {
+        return true;
+    }
+    return str_starts_with($normalized, 'PE') && !str_starts_with($normalized, 'CPE');
+}
+
 function fetchScheduleEntry(PDO $pdo, int $entryId): ?array
 {
     $stmt = $pdo->prepare("\n        SELECT s.*, sub.subject_code, sub.subject_name\n        FROM schedules s\n        JOIN subjects sub ON s.subject_id = sub.id\n        WHERE s.id = ?\n    ");
@@ -115,7 +127,7 @@ function getAvailableTimeSlots(PDO $pdo, int $instructorId, int $roomId, int $en
     
     // Logic: Bar if Permanent AND Wednesday AND NOT (PATHFIT/PE)
     $isRestrictedInstructor = ($instStatus === 'permanent');
-    $isPeSubject = (str_contains($subjCode, 'PATHFIT') || (str_starts_with($subjCode, 'PE') && !str_starts_with($subjCode, 'CPE')));
+    $isPeSubject = isPathfitOrPeCode($subjCode);
     $applyWednesdayRestriction = ($isRestrictedInstructor && !$isPeSubject);
 
     $available = [];
@@ -343,15 +355,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $slotStmt = $pdo->prepare("SELECT day FROM time_slots WHERE id = ?");
         $slotStmt->execute([$time_slot_id]);
         $slotDay = strtolower((string)$slotStmt->fetchColumn());
-        
+        $subjStmt = $pdo->prepare("SELECT sub.subject_code FROM schedules s JOIN subjects sub ON s.subject_id = sub.id WHERE s.id = ?");
+        $subjStmt->execute([$entry_id]);
+        $subjCode = strtoupper((string)$subjStmt->fetchColumn());
+        $isPeSubject = isPathfitOrPeCode($subjCode);
+
         if ($slotDay === 'wednesday') {
             $instStmt = $pdo->prepare("SELECT status FROM instructors WHERE id = ?");
             $instStmt->execute([$instructor_id]);
             if (strtolower((string)$instStmt->fetchColumn()) === 'permanent') {
-                $subjStmt = $pdo->prepare("SELECT sub.subject_code FROM schedules s JOIN subjects sub ON s.subject_id = sub.id WHERE s.id = ?");
-                $subjStmt->execute([$entry_id]);
-                $subjCode = strtoupper((string)$subjStmt->fetchColumn());
-                if (!(str_contains($subjCode, 'PATHFIT') || (str_starts_with($subjCode, 'PE') && !str_starts_with($subjCode, 'CPE')))) {
+                if (!$isPeSubject) {
                     $policy_violation = true;
                 }
             }

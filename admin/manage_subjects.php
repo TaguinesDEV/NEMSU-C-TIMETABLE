@@ -63,6 +63,12 @@ try {
     if (!isset($subjectColumns['prerequisites'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN prerequisites TEXT NULL AFTER year_level");
     }
+    if (!isset($subjectColumns['preferred_start_time'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN preferred_start_time TIME NULL AFTER prerequisites");
+    }
+    if (!isset($subjectColumns['preferred_end_time'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN preferred_end_time TIME NULL AFTER preferred_start_time");
+    }
 } catch (Exception $e) {
     // Continue page load even if auto-migration is not allowed in this environment.
 }
@@ -519,6 +525,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($preferred_day_pair === '') {
             $preferred_day_pair = null;
         }
+        $preferred_start = !empty($_POST['preferred_start_time']) ? $_POST['preferred_start_time'] : null;
+        $preferred_end = !empty($_POST['preferred_end_time']) ? $_POST['preferred_end_time'] : null;
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
@@ -536,7 +544,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Credits/units must be greater than 0.";
         } else {
             try {
-                $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, lecture_credits, lab_credits, department, program_id, subject_type, semester, year_level, preferred_day_pair, prerequisites, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, lecture_credits, lab_credits, department, program_id, subject_type, semester, year_level, preferred_day_pair, prerequisites, preferred_start_time, preferred_end_time, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 $stmt->execute([
                     $subject_code,
                     $subject_name,
@@ -550,6 +558,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $year_level,
                     $preferred_day_pair,
                     $prerequisites,
+                    $preferred_start,
+                    $preferred_end,
                     $timeValues['hours_per_week'],
                     $timeValues['lecture_hours'],
                     $timeValues['lab_hours'],
@@ -580,6 +590,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($preferred_day_pair === '') {
             $preferred_day_pair = null;
         }
+        $preferred_start = !empty($_POST['preferred_start_time']) ? $_POST['preferred_start_time'] : null;
+        $preferred_end = !empty($_POST['preferred_end_time']) ? $_POST['preferred_end_time'] : null;
         if (!in_array($subject_type, ['major', 'minor'], true)) {
             $subject_type = 'major';
         }
@@ -597,7 +609,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Credits/units must be greater than 0.";
         } else {
             try {
-                $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, lecture_credits = ?, lab_credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, preferred_day_pair = ?, prerequisites = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
+                $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, lecture_credits = ?, lab_credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, preferred_day_pair = ?, prerequisites = ?, preferred_start_time = ?, preferred_end_time = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
                 $stmt->execute([
                     $subject_code,
                     $subject_name,
@@ -611,6 +623,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $year_level,
                     $preferred_day_pair,
                     $prerequisites,
+                    $preferred_start,
+                    $preferred_end,
                     $timeValues['hours_per_week'],
                     $timeValues['lecture_hours'],
                     $timeValues['lab_hours'],
@@ -1435,6 +1449,17 @@ if ($selectedSemester !== '') {
                     <input type="text" id="prerequisites" name="prerequisites" placeholder="Optional prerequisite text">
                 </div>
 
+                <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div class="form-group">
+                        <label for="preferred_start_time">Preferred Start Hour:</label>
+                        <input type="time" id="preferred_start_time" name="preferred_start_time">
+                    </div>
+                    <div class="form-group">
+                        <label for="preferred_end_time">Preferred End Hour:</label>
+                        <input type="time" id="preferred_end_time" name="preferred_end_time">
+                    </div>
+                </div>
+
                 <div id="add_major_breakdown">
                     <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
                         <div class="form-group">
@@ -1614,6 +1639,14 @@ if ($selectedSemester !== '') {
                                 <div class="form-group">
                                     <label for="edit_prerequisites">Prerequisites:</label>
                                     <input type="text" id="edit_prerequisites" name="prerequisites">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_preferred_start_time">Pref. Start:</label>
+                                    <input type="time" id="edit_preferred_start_time" name="preferred_start_time">
+                                </div>
+                                <div class="form-group">
+                                    <label for="edit_preferred_end_time">Pref. End:</label>
+                                    <input type="time" id="edit_preferred_end_time" name="preferred_end_time">
                                 </div>
                             </div>
                         </div>
@@ -1871,6 +1904,8 @@ if ($selectedSemester !== '') {
                     document.getElementById('edit_semester').value = data.semester || '1st Semester';
                     document.getElementById('edit_year_level').value = String(data.year_level || 1);
                     document.getElementById('edit_prerequisites').value = data.prerequisites || '';
+                    document.getElementById('edit_preferred_start_time').value = data.preferred_start_time || '';
+                    document.getElementById('edit_preferred_end_time').value = data.preferred_end_time || '';
                     document.getElementById('edit_preferred_day_pair').value = data.preferred_day_pair || '';
                     const editTypeEl = document.getElementById('edit_subject_type');
                     const editHoursEl = document.getElementById('edit_hours_per_week');

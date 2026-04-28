@@ -134,14 +134,12 @@ $selected_job_name = trim((string)($_POST['job_name'] ?? $_GET['job_name'] ?? ''
 if ($selected_job_name === '') {
     $selected_job_name = 'Schedule Generation ' . date('Y-m-d H:i:s');
 }
-$selected_preferred_day_enabled = isset($_POST['preferred_day_enabled']) || isset($_POST['mirror_enabled']);
-$selected_preferred_day_mode = strtolower(trim((string)($_POST['preferred_day_mode'] ?? 'strict')));
-if (!in_array($selected_preferred_day_mode, ['soft', 'strict'], true)) {
-    $selected_preferred_day_mode = 'strict';
+$selected_fast_paired_day_enabled = isset($_POST['preferred_day_enabled']) || isset($_POST['mirror_enabled']);
+$selected_fast_paired_day_mode = strtolower(trim((string)($_POST['preferred_day_mode'] ?? 'strict')));
+if (!in_array($selected_fast_paired_day_mode, ['soft', 'strict'], true)) {
+    $selected_fast_paired_day_mode = 'strict';
 }
 $selected_individual_weekdays_enabled = isset($_POST['weekday_mode_enabled']);
-$selected_non_mirror_enabled = !$selected_preferred_day_enabled && !$selected_individual_weekdays_enabled;
-$selected_non_mirror_mode = (string)($_POST['non_mirror_mode'] ?? '1') === '0' ? '0' : '1';
 $selected_allow_saturday = isset($_POST['allow_saturday']);
 $selected_avoid_back_to_back = isset($_POST['avoid_back_to_back']);
 
@@ -265,6 +263,17 @@ try {
     }
 } catch (Exception $e) {}
 
+$cross_program_instructors = array_values(array_filter($cross_program_instructors, function ($inst) use ($instructor_subject_codes, $available_subject_codes) {
+    $inst_id = (int)($inst['id'] ?? 0);
+    foreach (($instructor_subject_codes[$inst_id] ?? []) as $code) {
+        $normalized = strtoupper(trim((string)$code));
+        if ($normalized !== '' && isset($available_subject_codes[$normalized])) {
+            return true;
+        }
+    }
+    return false;
+}));
+
 $all_time_slots = $pdo->query("
     SELECT * FROM time_slots
     ORDER BY FIELD(day,'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'), start_time
@@ -280,22 +289,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $num_sections = max(1, min(10, (int)($_POST['num_sections'] ?? 1)));
 
             $allow_saturday = isset($_POST['allow_saturday']);
-            $preferred_day_enabled = isset($_POST['preferred_day_enabled']) || isset($_POST['mirror_enabled']);
+            $fast_paired_day_enabled = isset($_POST['preferred_day_enabled']) || isset($_POST['mirror_enabled']);
             $individual_weekdays_enabled = isset($_POST['weekday_mode_enabled']);
             if ($individual_weekdays_enabled) {
-                $preferred_day_enabled = false;
+                $fast_paired_day_enabled = false;
             }
-            $preferred_day_mode = strtolower(trim((string)($_POST['preferred_day_mode'] ?? 'strict')));
-            if (!in_array($preferred_day_mode, ['soft', 'strict'], true)) {
-                $preferred_day_mode = 'strict';
+            $fast_paired_day_mode = strtolower(trim((string)($_POST['preferred_day_mode'] ?? 'strict')));
+            if (!in_array($fast_paired_day_mode, ['soft', 'strict'], true)) {
+                $fast_paired_day_mode = 'strict';
             }
-            $preferred_day_pairs = $preferred_day_enabled ? [
+            $preferred_day_pairs = $fast_paired_day_enabled ? [
                 ['day' => 'Monday', 'mirror' => 'Thursday'],
                 ['day' => 'Tuesday', 'mirror' => 'Friday'],
             ] : [];
             $mirror_pairs = $preferred_day_pairs;
             $four_day_pattern = !$individual_weekdays_enabled && !empty($mirror_pairs);
-            $non_mirror_mode = (string)($_POST['non_mirror_mode'] ?? '1') === '0' ? 0 : 1;
+            // Keep the solver's default Wednesday/non-mirror behavior enabled.
+            $non_mirror_mode = 1;
 
             $filtered_time_slots = [];
             foreach ($all_time_slots as $ts) {
@@ -325,14 +335,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'day_grouping_mode' => $individual_weekdays_enabled ? 'individual' : ($four_day_pattern ? 'paired' : 'standard'),
                     'individual_weekdays' => $individual_weekdays_enabled,
                     // Strict preferred-day mode must not fall back to non-mirrored placement.
-                    'allow_non_mirror_fallback' => $four_day_pattern ? ($preferred_day_mode !== 'strict') : false,
-                    'preferred_day_enabled' => $preferred_day_enabled,
-                    'preferred_day_mode' => $preferred_day_enabled ? $preferred_day_mode : 'none',
+                    'allow_non_mirror_fallback' => $four_day_pattern ? ($fast_paired_day_mode !== 'strict') : false,
+                    'preferred_day_enabled' => $fast_paired_day_enabled,
+                    'preferred_day_mode' => $fast_paired_day_enabled ? $fast_paired_day_mode : 'none',
                     'preferred_day_pairs' => $preferred_day_pairs,
                 ]
             ];
 
             $selected_instructor_ids = array_map('intval', $_POST['selected_instructors'] ?? []);
+            $selected_instructor_id_set = array_fill_keys($selected_instructor_ids, true);
 
             $approved_overload_hours = [];
             if (!empty($selected_instructor_ids)) {
@@ -351,33 +362,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } catch (Exception $e) {}
             }
 
+            $input_data['instructor_subject_map'] = [];
+            foreach ($selected_instructor_ids as $inst_id) {
+                $raw_codes = $_POST['instructor_subject_map'][$inst_id] ?? [];
+                $codes = array_filter(array_map(fn($c) => strtoupper(trim((string)$c)), $raw_codes), fn($code) => isset($available_subject_codes[$code]));
+                if (!empty($codes)) {
+                    $input_data['instructor_subject_map'][(string)$inst_id] = array_values($codes);
+                }
+            }
+
+            $mapped_instructor_id_set = array_fill_keys(array_map('intval', array_keys($input_data['instructor_subject_map'])), true);
             foreach ($instructors as $inst) {
-                if (in_array((int)$inst['id'], $selected_instructor_ids, true)) {
-                    $iid = (int)$inst['id'];
+                $iid = (int)$inst['id'];
+                if (isset($selected_instructor_id_set[$iid]) && isset($mapped_instructor_id_set[$iid])) {
                     $inst['max_hours_per_week'] = $approved_overload_hours[$iid] ?? $inst['max_hours_per_week'] ?? 0;
                     $input_data['instructors'][] = $inst;
                 }
             }
 
-            $input_data['instructor_subject_map'] = [];
-            foreach ($selected_instructor_ids as $inst_id) {
-                $raw_codes = $_POST['instructor_subject_map'][$inst_id] ?? [];
-                $codes = array_filter(array_map(fn($c) => strtoupper(trim((string)$c)), $raw_codes), fn($code) => isset($available_subject_codes[$code]));
-                $input_data['instructor_subject_map'][(string)$inst_id] = array_values($codes);
-            }
-
-            if (!empty($_POST['selected_rooms'])) {
+            $selected_room_ids = array_map('intval', $_POST['selected_rooms'] ?? []);
+            $selected_room_id_set = array_fill_keys($selected_room_ids, true);
+            if (!empty($selected_room_id_set)) {
                 foreach ($rooms as $room) {
-                    if (in_array($room['id'], $_POST['selected_rooms'])) $input_data['rooms'][] = $room;
+                    if (isset($selected_room_id_set[(int)$room['id']])) {
+                        $input_data['rooms'][] = $room;
+                    }
                 }
             }
 
-            $selected_subject_codes = [];
+            $selected_subject_code_map = [];
             foreach ($input_data['instructor_subject_map'] as $codes) {
-                $selected_subject_codes = array_merge($selected_subject_codes, $codes);
+                foreach ($codes as $code) {
+                    $selected_subject_code_map[$code] = true;
+                }
             }
-            $selected_subject_codes = array_unique($selected_subject_codes);
-            foreach ($selected_subject_codes as $code) {
+            foreach (array_keys($selected_subject_code_map) as $code) {
                 if (isset($subject_by_code[$code])) $input_data['subjects'][] = $subject_by_code[$code];
             }
 
@@ -526,8 +545,12 @@ foreach($instructor_groups as $group_name => $group_instructors):
 <?php else: ?>
 <?php foreach($group_instructors as $i):
 $inst_id = (int)$i['id'];
-$subjects = $instructor_subject_codes[$inst_id]??[];
-$auto = !empty($subjects);
+$subjects = array_values(array_unique(array_map(function ($code) {
+    return strtoupper(trim((string)$code));
+}, $instructor_subject_codes[$inst_id] ?? [])));
+$valid_subjects = array_values(array_filter($subjects, fn($c) => $c !== '' && isset($available_subject_codes[$c])));
+$auto = !empty($valid_subjects);
+$disabled = empty($valid_subjects);
 $inst_program = trim((string)($i['linked_program_name'] ?: $i['department']));
 $inst_search = strtolower(trim(
     (string)($i['full_name'] ?? '') . ' ' .
@@ -537,7 +560,7 @@ $inst_search = strtolower(trim(
 ));
 ?>
 <div class="inst-option-row checkbox-row" data-search="<?php echo htmlspecialchars($inst_search); ?>">
-<input type="checkbox" name="selected_instructors[]" value="<?php echo $inst_id;?>" class="inst-cb" <?php echo $auto?'checked':'';?>>
+<input type="checkbox" name="selected_instructors[]" value="<?php echo $inst_id;?>" class="inst-cb" <?php echo $auto ? 'checked' : ''; ?> <?php echo $disabled ? 'disabled' : ''; ?>>
 <span class="inst-option-meta">
 <span class="inst-option-name">
 <?php echo htmlspecialchars($i['full_name']);?>
@@ -546,12 +569,13 @@ $inst_search = strtolower(trim(
 <?php endif; ?>
 </span>
 <span class="inst-option-sub"><?php echo htmlspecialchars((string)($i['department'] ?: 'No Department')); ?></span>
-<?php if($auto):?><span class="inst-subject-count"><?php echo count($subjects);?> subjects</span><?php endif;?>
+<?php if($auto):?><span class="inst-subject-count"><?php echo count($valid_subjects);?> matching subjects</span><?php endif;?>
+<?php if($disabled):?><span class="inst-option-sub">No matching subjects for the current semester/program.</span><?php endif;?>
 </span>
 </div>
 <?php if($auto):?>
 <div class="subject-group" data-for="<?php echo $inst_id;?>" style="display:<?php echo $auto?'block':'none';?>">
-<?php foreach(array_filter($subjects,fn($c)=>isset($available_subject_codes[$c])) as $code):
+<?php foreach($valid_subjects as $code):
 $label = $subject_name_map[$code]??'';
 ?>
 <div class="checkbox-row subject-row">
@@ -649,19 +673,22 @@ Avoid back-to-back</label>
 <label class="checkbox-row"><input type="checkbox" name="allow_saturday" <?php echo $selected_allow_saturday?'checked':'';?>>
 Saturday makeups</label>
 <div style="display:flex;gap:1rem;flex-wrap:wrap">
-<label class="checkbox-row"><input type="checkbox" id="preferred_day_cb" name="preferred_day_enabled" <?php echo $selected_preferred_day_enabled?'checked':'';?>>
-Preferred Day Pair</label>
-<label class="checkbox-row"><input type="checkbox" id="nonmirror_cb" name="non_mirror_enabled" <?php echo $selected_non_mirror_enabled?'checked':'';?>>
-Non-mirror</label>
+<label class="checkbox-row"><input type="checkbox" id="fast_paired_day_cb" name="preferred_day_enabled" <?php echo $selected_fast_paired_day_enabled?'checked':'';?>>
+Fast Paired Day</label>
 <label class="checkbox-row"><input type="checkbox" id="weekday_cb" name="weekday_mode_enabled" <?php echo $selected_individual_weekdays_enabled?'checked':'';?>>
 Mon-Fri only</label>
 </div>
-<div class="form-group" id="preferred_day_mode_group" <?php echo $selected_preferred_day_enabled ? '' : 'hidden'; ?>>
-<label for="preferred_day_mode">Preferred Day Handling</label>
-<select name="preferred_day_mode" id="preferred_day_mode">
-<option value="soft" <?php echo $selected_preferred_day_mode==='soft'?'selected':''; ?>>Soft - try chosen pair first, then allow fallback</option>
-<option value="strict" <?php echo $selected_preferred_day_mode==='strict'?'selected':''; ?>>Strict - only use the chosen pair day</option>
+<div class="form-group" id="fast_paired_day_mode_group" <?php echo $selected_fast_paired_day_enabled ? '' : 'hidden'; ?>>
+<label for="fast_paired_day_mode">Fast Paired Day Handling</label>
+<select name="preferred_day_mode" id="fast_paired_day_mode">
+<option value="soft" <?php echo $selected_fast_paired_day_mode==='soft'?'selected':''; ?>>Soft - try Mon/Thu and Tue/Fri first, then allow fallback</option>
+<option value="strict" <?php echo $selected_fast_paired_day_mode==='strict'?'selected':''; ?>>Strict - only use Mon/Thu and Tue/Fri pairing</option>
 </select>
+</div>
+<div class="form-group" id="fast_paired_day_help" <?php echo $selected_fast_paired_day_enabled ? '' : 'hidden'; ?>>
+<div style="padding:10px 12px;background:#f8f9fa;border:1px solid #d8dee6;border-radius:8px;">
+Uses fast paired-day anchor generation that mirrors Monday/Tuesday placements into Thursday/Friday and repairs room mismatches during generation.
+</div>
 </div>
 </div>
 </details>
@@ -681,9 +708,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     const isRowVisible=(row)=>!!row && !row.hidden && row.offsetParent !== null;
     const getColumnCheckboxes=(column)=>{
         if(!column) return [];
-        if(column.classList.contains('inst-column')) return Array.from(column.querySelectorAll('.inst-cb'));
-        if(column.classList.contains('room-column')) return Array.from(column.querySelectorAll('.room-cb'));
-        return Array.from(column.querySelectorAll('.inst-cb, .room-cb'));
+        if(column.classList.contains('inst-column')) return Array.from(column.querySelectorAll('.inst-cb')).filter(cb=>!cb.disabled);
+        if(column.classList.contains('room-column')) return Array.from(column.querySelectorAll('.room-cb')).filter(cb=>!cb.disabled);
+        return Array.from(column.querySelectorAll('.inst-cb, .room-cb')).filter(cb=>!cb.disabled);
     };
 
     const updateCount=()=>{
@@ -801,26 +828,31 @@ document.addEventListener('DOMContentLoaded',()=>{
         });
     });
 
-    const preferredDayCb=document.getElementById('preferred_day_cb');
-    const preferredDayModeGroup=document.getElementById('preferred_day_mode_group');
+    const fastPairedDayCb=document.getElementById('fast_paired_day_cb');
+    const fastPairedDayModeGroup=document.getElementById('fast_paired_day_mode_group');
+    const fastPairedDayHelp=document.getElementById('fast_paired_day_help');
     const weekdayCb=document.getElementById('weekday_cb');
-    const syncPreferredDayUi=()=>{
-        if(!preferredDayCb || !preferredDayModeGroup) return;
-        preferredDayModeGroup.hidden=!preferredDayCb.checked;
+    const syncFastPairedDayUi=()=>{
+        if(!fastPairedDayCb || !fastPairedDayModeGroup) return;
+        const showPaired=fastPairedDayCb.checked;
+        fastPairedDayModeGroup.hidden=!showPaired;
+        if(fastPairedDayHelp){
+            fastPairedDayHelp.hidden=!showPaired;
+        }
     };
-    preferredDayCb?.addEventListener('change',()=>{
-        if(preferredDayCb.checked && weekdayCb){
+    fastPairedDayCb?.addEventListener('change',()=>{
+        if(fastPairedDayCb.checked && weekdayCb){
             weekdayCb.checked=false;
         }
-        syncPreferredDayUi();
+        syncFastPairedDayUi();
     });
     weekdayCb?.addEventListener('change',()=>{
-        if(weekdayCb.checked && preferredDayCb){
-            preferredDayCb.checked=false;
+        if(weekdayCb.checked && fastPairedDayCb){
+            fastPairedDayCb.checked=false;
         }
-        syncPreferredDayUi();
+        syncFastPairedDayUi();
     });
-    syncPreferredDayUi();
+    syncFastPairedDayUi();
 });
 </script>
 </body>
