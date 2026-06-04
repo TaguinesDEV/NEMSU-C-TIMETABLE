@@ -432,7 +432,8 @@ $reportEndTimeExpression = $hasScheduledMinutesColumn
 
 // Build query (include subject credits/hours for report format)
 $query = "
-    SELECT s.*, sub.subject_code, sub.subject_name, sub.credits, sub.lecture_credits, sub.lab_credits, sub.hours_per_week,
+    SELECT s.*, sub.subject_code, sub.subject_name, sub.credits, sub.lecture_credits, sub.lab_credits,
+           sub.instructor_lecture_units, sub.instructor_lab_units, sub.hours_per_week,
            sub.lecture_hours, sub.lab_hours, sub.subject_type,
            {$scheduledHoursExpression} AS scheduled_hours,
            {$scheduledMinutesExpression} AS report_scheduled_minutes,
@@ -826,12 +827,12 @@ $merge_section_row_room_labels = static function (array &$targetRow, array $sour
 };
 
 $workload_group_titles = [
-    'MTh/Morning' => 'MTH/Morning',
-    'MTh/Afternoon' => 'MTH/Afternoon',
-    'Wed/Morning' => 'WED/Morning',
-    'Wed/Afternoon' => 'WED/Afternoon',
-    'TF/Morning' => 'TF/Morning',
-    'TF/Afternoon' => 'TF/Afternoon',
+    'MTh/Morning' => 'M/TH Morning',
+    'MTh/Afternoon' => 'M/TH Afternoon',
+    'Wed/Morning' => 'W Morning',
+    'Wed/Afternoon' => 'W Afternoon',
+    'TF/Morning' => 'T/F Morning',
+    'TF/Afternoon' => 'T/F Afternoon',
     'Monday/Morning' => 'MONDAY/Morning',
     'Monday/Afternoon' => 'MONDAY/Afternoon',
     'Tuesday/Morning' => 'TUESDAY/Morning',
@@ -846,12 +847,12 @@ $workload_group_titles = [
 ];
 
 $section_group_titles = [
-    'MTh/A.M.' => 'MTh/Morning',
-    'MTh/P.M.' => 'MTh/Afternoon',
-    'TF/A.M.' => 'TF/Morning',
-    'TF/P.M.' => 'TF/Afternoon',
-    'Wed/A.M.' => 'Wed/Morning',
-    'Wed/P.M.' => 'Wed/Afternoon',
+    'MTh/A.M.' => 'M/TH Morning',
+    'MTh/P.M.' => 'M/TH Afternoon',
+    'TF/A.M.' => 'T/F Morning',
+    'TF/P.M.' => 'T/F Afternoon',
+    'Wed/A.M.' => 'W Morning',
+    'Wed/P.M.' => 'W Afternoon',
     'Monday/A.M.' => 'Monday/Morning',
     'Monday/P.M.' => 'Monday/Afternoon',
     'Tuesday/A.M.' => 'Tuesday/Morning',
@@ -920,6 +921,67 @@ $get_effective_slot_multiplier = static function (float $baseMultiplier, int $sl
     }
     return $baseMultiplier;
 };
+$is_duplicate_paired_day_job = static function (array $row, array &$job_input_cache): bool {
+    $jobId = (int)($row['job_id'] ?? 0);
+    if (!array_key_exists($jobId, $job_input_cache)) {
+        $raw = (string)($row['input_data'] ?? '');
+        $decoded = json_decode($raw, true);
+        $job_input_cache[$jobId] = is_array($decoded) ? $decoded : [];
+    }
+    $jobInput = $job_input_cache[$jobId] ?? [];
+    $constraints = is_array($jobInput['constraints'] ?? null) ? $jobInput['constraints'] : [];
+    return !empty($constraints['duplicate_paired_day_mode']);
+};
+$is_duplicate_pair_group = static function (string $groupKey): bool {
+    return (bool)preg_match('/^(MTh|TF)\//i', trim($groupKey));
+};
+$is_duplicate_wednesday_group = static function (string $groupKey): bool {
+    return (bool)preg_match('/^(Wed|Wednesday)\//i', trim($groupKey));
+};
+$get_report_hour_multiplier = static function (
+    array $row,
+    string $groupKey,
+    string $groupMode,
+    int $slotRowCount,
+    array &$job_input_cache
+) use (
+    $get_paired_group_multiplier,
+    $get_effective_slot_multiplier,
+    $is_duplicate_paired_day_job,
+    $is_duplicate_pair_group
+): float {
+    if ($groupMode !== 'paired') {
+        return 1.0;
+    }
+    if ($is_duplicate_paired_day_job($row, $job_input_cache)) {
+        return $is_duplicate_pair_group($groupKey) ? 2.0 : 1.0;
+    }
+    $baseMultiplier = $get_paired_group_multiplier($groupKey, $groupMode);
+    return $get_effective_slot_multiplier((float)$baseMultiplier, $slotRowCount);
+};
+$get_report_unit_multiplier = static function (
+    array $row,
+    string $groupKey,
+    string $groupMode,
+    int $slotRowCount,
+    array &$job_input_cache
+) use (
+    $get_report_hour_multiplier,
+    $is_duplicate_paired_day_job,
+    $is_duplicate_pair_group,
+    $is_duplicate_wednesday_group
+): float {
+    if ($groupMode !== 'paired') {
+        return 1.0;
+    }
+    if ($is_duplicate_paired_day_job($row, $job_input_cache)) {
+        if ($is_duplicate_pair_group($groupKey) || $is_duplicate_wednesday_group($groupKey)) {
+            return 2.0;
+        }
+        return 1.0;
+    }
+    return $get_report_hour_multiplier($row, $groupKey, $groupMode, $slotRowCount, $job_input_cache);
+};
 $build_subject_unit_key = static function (array $row) use ($resolve_row_meeting_kind): string {
     $subjectKey = (int)($row['subject_id'] ?? 0);
     if ($subjectKey > 0) {
@@ -979,6 +1041,27 @@ $get_row_units = static function (array $row) use ($resolve_row_meeting_kind): f
     }
     return $credits;
 };
+$get_row_instructor_units = static function (array $row) use ($resolve_row_meeting_kind, $get_row_units): float {
+    $meetingKind = $resolve_row_meeting_kind($row);
+    $instructorLectureUnits = (float)($row['instructor_lecture_units'] ?? 0);
+    $instructorLabUnits = (float)($row['instructor_lab_units'] ?? 0);
+
+    if ($meetingKind === 'lecture' && $instructorLectureUnits > 0) {
+        return $instructorLectureUnits;
+    }
+    if ($meetingKind === 'lab' && $instructorLabUnits > 0) {
+        return $instructorLabUnits;
+    }
+
+    if ($instructorLectureUnits > 0 && $instructorLabUnits <= 0) {
+        return $instructorLectureUnits;
+    }
+    if ($instructorLabUnits > 0 && $instructorLectureUnits <= 0) {
+        return $instructorLabUnits;
+    }
+
+    return $get_row_units($row);
+};
 $build_special_approval_key = static function (array $row) use ($format_course_code, &$job_input_cache): string {
     $subjectKey = (int)($row['subject_id'] ?? 0);
     if ($subjectKey > 0) {
@@ -1017,10 +1100,10 @@ $build_instructor_load_snapshot = static function (array $rows) use (
     &$job_input_cache,
     $day_to_group,
     $format_workload_time,
-    $get_paired_group_multiplier,
-    $get_effective_slot_multiplier,
+    $get_report_hour_multiplier,
+    $get_report_unit_multiplier,
     $build_subject_unit_key,
-    $get_row_units
+    $get_row_instructor_units
 ): array {
     $workloadMode = 'paired';
     foreach ($rows as $row) {
@@ -1069,17 +1152,18 @@ $build_instructor_load_snapshot = static function (array $rows) use (
             $groupKey = $dayGroup . '/' . $period;
         }
 
-        $basePairMultiplier = $get_paired_group_multiplier((string)$groupKey, (string)$workloadMode);
         $row['report_end_time'] = (string)($row['report_end_time'] ?? $row['end_time'] ?? '');
         $row['report_time_label'] = $format_workload_time($row['start_time'] ?? '', $row['report_end_time']);
         $slotRowCount = (int)($slotCounts[$groupKey][$row['report_time_label']] ?? 1);
-        $effectivePairMultiplier = $get_effective_slot_multiplier((float)$basePairMultiplier, $slotRowCount);
+        $effectivePairMultiplier = $get_report_hour_multiplier($row, (string)$groupKey, (string)$workloadMode, $slotRowCount, $job_input_cache);
+        $effectiveUnitMultiplier = $get_report_unit_multiplier($row, (string)$groupKey, (string)$workloadMode, $slotRowCount, $job_input_cache);
         $row['report_pair_multiplier'] = (float)$effectivePairMultiplier;
+        $row['report_unit_multiplier'] = (float)$effectiveUnitMultiplier;
         $instructorWorkload[$groupKey][] = $row;
 
         $subjectUnitKey = $build_subject_unit_key($row);
         if ($subjectUnitKey !== '' && !isset($countedSubjectUnits[$subjectUnitKey])) {
-            $totalUnits += $get_row_units($row) * $effectivePairMultiplier;
+            $totalUnits += $get_row_instructor_units($row) * $effectiveUnitMultiplier;
             $countedSubjectUnits[$subjectUnitKey] = true;
         }
 
@@ -1120,8 +1204,8 @@ $build_instructor_load_snapshot = static function (array $rows) use (
                     break;
                 }
             }
-            $unitPairMultiplier = (float)($unitRow['report_pair_multiplier'] ?? 1.0);
-            $candidateSubject['units'] += $get_row_units($unitRow) * $unitPairMultiplier;
+            $unitPairMultiplier = (float)($unitRow['report_unit_multiplier'] ?? $unitRow['report_pair_multiplier'] ?? 1.0);
+            $candidateSubject['units'] += $get_row_instructor_units($unitRow) * $unitPairMultiplier;
         }
         $candidateSubject['units'] = round((float)$candidateSubject['units'], 2);
     }
@@ -1517,13 +1601,15 @@ if (!$is_instructor_report) {
                 }
             }
             $subject_unit_key = $build_subject_unit_key($row);
+            $slotRowCount = (int)($section_slot_counts[$group_key][$rowTimeLabel] ?? 1);
+            $effectivePairMultiplier = $get_report_hour_multiplier($row, (string)$group_key, (string)$section_group_mode, $slotRowCount, $job_input_cache);
+            $effectiveUnitMultiplier = $get_report_unit_multiplier($row, (string)$group_key, (string)$section_group_mode, $slotRowCount, $job_input_cache);
             if ($subject_unit_key !== '' && !isset($counted_subject_units[$subject_unit_key])) {
-                $basePairMultiplier = $get_paired_group_multiplier((string)$group_key, (string)$section_group_mode);
-                $slotRowCount = (int)($section_slot_counts[$group_key][$rowTimeLabel] ?? 1);
-                $effectivePairMultiplier = $get_effective_slot_multiplier((float)$basePairMultiplier, $slotRowCount);
-                $section_total_units += $get_row_units($row) * $effectivePairMultiplier;
+                $section_total_units += $get_row_units($row) * $effectiveUnitMultiplier;
                 $counted_subject_units[$subject_unit_key] = true;
             }
+            $row['report_pair_multiplier'] = (float)($row['report_pair_multiplier'] ?? $effectivePairMultiplier);
+            $row['report_unit_multiplier'] = (float)($row['report_unit_multiplier'] ?? $effectiveUnitMultiplier);
         }
         foreach ($by_day as $gk => $rows) {
             usort($by_day[$gk], function ($a, $b) {
@@ -1728,7 +1814,6 @@ if ($is_instructor_report) {
             $period = (strtotime($row['start_time']) < strtotime('12:00:00')) ? 'Morning' : 'Afternoon';
             $group_key = $dg . '/' . $period;
         }
-        $basePairMultiplier = $get_paired_group_multiplier((string)$group_key, (string)$instructor_workload_mode);
         if (!isset($instructor_workload[$group_key])) {
             $instructor_workload[$group_key] = [];
         }
@@ -1736,13 +1821,15 @@ if ($is_instructor_report) {
         $row['report_end_time'] = (string)($row['report_end_time'] ?? $row['end_time'] ?? '');
         $row['report_time_label'] = $format_workload_time($row['start_time'], $row['report_end_time']);
         $slotRowCount = (int)($instructor_slot_counts[$group_key][$row['report_time_label']] ?? 1);
-        $effectivePairMultiplier = $get_effective_slot_multiplier((float)$basePairMultiplier, $slotRowCount);
+        $effectivePairMultiplier = $get_report_hour_multiplier($row, (string)$group_key, (string)$instructor_workload_mode, $slotRowCount, $job_input_cache);
+        $effectiveUnitMultiplier = $get_report_unit_multiplier($row, (string)$group_key, (string)$instructor_workload_mode, $slotRowCount, $job_input_cache);
         $row['report_pair_multiplier'] = (float)$effectivePairMultiplier;
+        $row['report_unit_multiplier'] = (float)$effectiveUnitMultiplier;
         $row['report_students'] = (int) ($row['room_capacity'] ?? 0) > 0 ? (int) $row['room_capacity'] : '';
         $instructor_workload[$group_key][] = $row;
         $subject_unit_key = $build_subject_unit_key($row);
         if ($subject_unit_key !== '' && !isset($counted_instructor_subject_units[$subject_unit_key])) {
-            $total_units += $get_row_units($row) * $effectivePairMultiplier;
+            $total_units += $get_row_instructor_units($row) * $effectiveUnitMultiplier;
             $counted_instructor_subject_units[$subject_unit_key] = true;
         }
         $row_hours = (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * $effectivePairMultiplier;
@@ -1777,8 +1864,8 @@ if ($is_instructor_report) {
                     break;
                 }
             }
-            $unitPairMultiplier = (float)($unitRow['report_pair_multiplier'] ?? 1.0);
-            $candidateSubject['units'] += $get_row_units($unitRow) * $unitPairMultiplier;
+            $unitPairMultiplier = (float)($unitRow['report_unit_multiplier'] ?? $unitRow['report_pair_multiplier'] ?? 1.0);
+            $candidateSubject['units'] += $get_row_instructor_units($unitRow) * $unitPairMultiplier;
         }
         $candidateSubject['units'] = round((float)$candidateSubject['units'], 2);
     }
@@ -1896,7 +1983,7 @@ if ($is_instructor_report) {
                     'time_label' => (string)($row['report_time_label'] ?? ''),
                     'course_code' => (string)($row['report_course_code'] ?? ''),
                     'students' => (string)($row['report_students'] ?? ''),
-                    'units' => $get_row_units($row),
+                    'units' => $get_row_instructor_units($row) * (float)($row['report_unit_multiplier'] ?? $row['report_pair_multiplier'] ?? 1.0),
                     'overload_hours' => (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * (float)($row['report_pair_multiplier'] ?? 1.0),
                     'room_number' => (string)($row['room_number'] ?? ''),
                 ];
@@ -1960,10 +2047,11 @@ if ($is_instructor_report) {
         foreach ($instructor_workload as $groupKey => $groupRows) {
             foreach ($groupRows as $row) {
                 $rowPairMultiplier = (float)($row['report_pair_multiplier'] ?? $get_paired_group_multiplier((string)$groupKey, (string)$instructor_workload_mode));
+                $rowUnitMultiplier = (float)($row['report_unit_multiplier'] ?? $rowPairMultiplier);
                 $actual_total_hours += (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * $rowPairMultiplier;
                 $subjectUnitKey = $build_subject_unit_key($row);
                 if ($subjectUnitKey !== '' && !isset($actual_subject_keys[$subjectUnitKey])) {
-                    $actual_total_units += $get_row_units($row) * $rowPairMultiplier;
+                    $actual_total_units += $get_row_instructor_units($row) * $rowUnitMultiplier;
                     $actual_subject_keys[$subjectUnitKey] = true;
                 }
                 $subjectPrepKey = (int)($row['subject_id'] ?? 0);
@@ -2024,7 +2112,7 @@ if ($is_instructor_report) {
                         'time_label' => $format_schedule_time_label($row['start_time'], $row['report_end_time'] ?? $row['end_time']),
                         'course_code' => (string)($row['report_course_code'] ?? $format_course_code($row, $job_input_cache)),
                         'students' => (string)((int)($row['room_capacity'] ?? 0) > 0 ? (int)$row['room_capacity'] : ''),
-                        'units' => $get_row_units($row),
+                        'units' => $get_row_instructor_units($row) * (float)($row['report_unit_multiplier'] ?? $row['report_pair_multiplier'] ?? 1.0),
                         'praise_hours' => (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * (float)($row['report_pair_multiplier'] ?? 1.0),
                         'room_number' => (string)($row['room_number'] ?? ''),
                     ];
@@ -2090,7 +2178,7 @@ if ($is_instructor_report) {
                             'time_label' => $format_schedule_time_label($row['start_time'], $row['report_end_time'] ?? $row['end_time']),
                             'course_code' => (string)($row['report_course_code'] ?? $format_course_code($row, $job_input_cache)),
                             'students' => (string)((int)($row['room_capacity'] ?? 0) > 0 ? (int)$row['room_capacity'] : ''),
-                            'units' => $get_row_units($row),
+                            'units' => $get_row_instructor_units($row) * (float)($row['report_unit_multiplier'] ?? $row['report_pair_multiplier'] ?? 1.0),
                             'praise_hours' => (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * (float)($row['report_pair_multiplier'] ?? 1.0),
                             'room_number' => (string)($row['room_number'] ?? ''),
                         ];
@@ -2130,7 +2218,7 @@ if ($is_instructor_report) {
                             'time_label' => (string)($row['report_time_label'] ?? ''),
                             'course_code' => (string)($row['report_course_code'] ?? ''),
                             'students' => (string)($row['report_students'] ?? ''),
-                            'units' => $get_row_units($row),
+                            'units' => $get_row_instructor_units($row) * (float)($row['report_unit_multiplier'] ?? $row['report_pair_multiplier'] ?? 1.0),
                             'overload_hours' => (float)($row['scheduled_hours'] ?? $row['hours_per_week'] ?? 0) * (float)($row['report_pair_multiplier'] ?? 1.0),
                             'room_number' => (string)($row['room_number'] ?? ''),
                         ];
@@ -2188,9 +2276,9 @@ if ($is_instructor_report) {
         return [
             'type' => 'praise',
             'heading' => 'PRAISE SUBJECTS',
-            'summary_title' => 'Units Requiring Special Approval (PRAISE)',
+            'summary_title' => 'Instructor Load Units Requiring Special Approval (PRAISE)',
             'summary_text' => 'These subject assignments were selected as the instructor PRAISE load.',
-            'subject_metric_label' => 'units',
+            'subject_metric_label' => 'instructor load units',
             'subjects' => array_values($subjectSummaries),
             'workload' => $pageWorkload,
             'mode' => (string)($pageSnapshot['mode'] ?? 'paired'),
@@ -3090,7 +3178,7 @@ if (isset($_GET['print'])) {
                                 $subjectBits = [];
                                 foreach (($entry['subjects'] ?? []) as $subject) {
                                     $subjectBits[] = $format_special_approval_subject_label($subject)
-                                        . ' (' . number_format((float)($subject['units'] ?? 0), 2) . ' units)';
+                                        . ' (' . number_format((float)($subject['units'] ?? 0), 2) . ' instructor load units)';
                                 }
                             ?>
                             <li style="margin-bottom: 8px;">
@@ -3098,7 +3186,7 @@ if (isset($_GET['print'])) {
                                     <?php echo htmlspecialchars((string)($entry['instructor_name'] ?? '')); ?>
                                 </a>
                                 :
-                                <?php echo number_format((float)($entry['total_units'] ?? 0), 2); ?> total units,
+                                <?php echo number_format((float)($entry['total_units'] ?? 0), 2); ?> total instructor load units,
                                 <?php echo number_format((float)($entry['excess_units'] ?? 0), 2); ?> above the 24.00-unit ceiling.
                                 <?php if (!empty($subjectBits)): ?>
                                     Suggested PRAISE subject(s): <?php echo htmlspecialchars(implode('; ', $subjectBits)); ?>.
@@ -3203,7 +3291,7 @@ if (isset($_GET['print'])) {
                                                     <input type="checkbox" name="selected_praise_subjects[]" value="<?php echo htmlspecialchars((string)$subjectKey); ?>" <?php echo in_array((string)$subjectKey, $selected_praise_subject_keys, true) ? 'checked' : ''; ?>>
                                                     <span>
                                                         <strong><?php echo htmlspecialchars($format_special_approval_subject_label($candidateSubject)); ?></strong><br>
-                                                        <span style="color: #9a3412;"><?php echo number_format((float)($candidateSubject['units'] ?? 0), 2); ?> unit(s)</span>
+                                                        <span style="color: #9a3412;"><?php echo number_format((float)($candidateSubject['units'] ?? 0), 2); ?> instructor load unit(s)</span>
                                                     </span>
                                                 </label>
                                             <?php endforeach; ?>
@@ -3273,13 +3361,14 @@ if (isset($_GET['print'])) {
                     <?php if ($is_praise && !empty($praise_subjects)): ?>
                         <div style="margin-bottom: 12px; border: 1px solid #f4b183; background: #fff7ed; padding: 14px; border-radius: 8px;">
                             <h3 style="color: #c2410c; margin-top: 0;">⚠️ Units Requiring Special Approval (PRAISE)</h3>
-                            <p style="margin-bottom: 8px;">The following assignments exceed the maximum permitted units for Permanent instructors and require special approval:</p>
+                            <div style="font-weight: 600; color: #9a3412; margin-bottom: 4px;">Instructor load units are used for faculty workload totals.</div>
+                            <p style="margin-bottom: 8px;">The following assignments exceed the maximum permitted instructor load units for Permanent instructors and require special approval:</p>
                             <ul style="margin: 0; padding-left: 20px;">
                                 <?php foreach ($praise_subjects as $praise_subject): ?>
                                     <li>
                                         <?php echo htmlspecialchars((string)($selected_instructor['full_name'] ?? '')); ?>:
                                         <?php echo htmlspecialchars($format_special_approval_subject_label($praise_subject)); ?>
-                                        - <?php echo number_format((float)($praise_subject['units'] ?? 0), 2); ?> units
+                                        - <?php echo number_format((float)($praise_subject['units'] ?? 0), 2); ?> instructor load units
                                     </li>
                                 <?php endforeach; ?>
                             </ul>
@@ -3334,7 +3423,7 @@ if (isset($_GET['print'])) {
                                 <th>Description</th>
                                 <th>Course Code</th>
                                 <th>No. of Students</th>
-                                <th>Units</th>
+                                <th>Instructor Load Units</th>
                                 <th>No. of Hours</th>
                                 <th>Room No.</th>
                             </tr>
@@ -3425,8 +3514,8 @@ if (isset($_GET['print'])) {
                                                         <td><?php echo htmlspecialchars($format_subject_description($slotRow)); ?></td>
                                                         <td><?php echo htmlspecialchars((string)($slotRow['report_course_code'] ?? '')); ?></td>
                                                         <td><?php echo htmlspecialchars((string)($slotRow['report_students'] ?? '')); ?></td>
-                                                        <td><?php echo htmlspecialchars(number_format($get_row_units($slotRow) * $slotPairMultiplier, 2)); ?></td>
-                                                        <td><?php echo htmlspecialchars(number_format((float)($slotRow['scheduled_hours'] ?? $slotRow['hours_per_week'] ?? 0) * $slotPairMultiplier, 2)); ?></td>
+                                                    <td><?php echo htmlspecialchars(number_format($get_row_instructor_units($slotRow) * (float)($slotRow['report_unit_multiplier'] ?? $slotPairMultiplier), 2)); ?></td>
+                                                        <td><?php echo htmlspecialchars(number_format((float)($slotRow['scheduled_hours'] ?? $slotRow['hours_per_week'] ?? 0) * (float)($slotRow['report_pair_multiplier'] ?? $slotPairMultiplier), 2)); ?></td>
                                                         <td><?php echo htmlspecialchars((string)($slotRow['report_room_label'] ?? $slotRow['room_number'] ?? '')); ?></td>
                                                     </tr>
                                                     <?php
@@ -3442,7 +3531,7 @@ if (isset($_GET['print'])) {
 
                     <table class="workload-summary">
                         <tr>
-                            <td class="summary-label">No. of Units</td>
+                            <td class="summary-label">Instructor Load Units</td>
                             <td></td>
                             <td></td>
                             <td></td>
@@ -3558,7 +3647,7 @@ if (isset($_GET['print'])) {
                                 <th>Description</th>
                                 <th>Course Code</th>
                                 <th>No. of Students</th>
-                                <th>Units</th>
+                                <th>Instructor Load Units</th>
                                 <th>No. of Hours</th>
                                 <th>Room No.</th>
                             </tr>
@@ -3630,8 +3719,8 @@ if (isset($_GET['print'])) {
                                                     <td><?php echo htmlspecialchars($format_subject_description($slotRow)); ?></td>
                                                     <td><?php echo htmlspecialchars((string)($slotRow['report_course_code'] ?? '')); ?></td>
                                                     <td><?php echo htmlspecialchars((string)($slotRow['report_students'] ?? '')); ?></td>
-                                                    <td><?php echo htmlspecialchars(number_format($get_row_units($slotRow) * $slotPairMultiplier, 2)); ?></td>
-                                                    <td><?php echo htmlspecialchars(number_format((float)($slotRow['scheduled_hours'] ?? $slotRow['hours_per_week'] ?? 0) * $slotPairMultiplier, 2)); ?></td>
+                                                        <td><?php echo htmlspecialchars(number_format($get_row_instructor_units($slotRow) * (float)($slotRow['report_unit_multiplier'] ?? $slotPairMultiplier), 2)); ?></td>
+                                                    <td><?php echo htmlspecialchars(number_format((float)($slotRow['scheduled_hours'] ?? $slotRow['hours_per_week'] ?? 0) * (float)($slotRow['report_pair_multiplier'] ?? $slotPairMultiplier), 2)); ?></td>
                                                     <td><?php echo htmlspecialchars((string)($slotRow['report_room_label'] ?? $slotRow['room_number'] ?? '')); ?></td>
                                                 </tr>
                                                 <?php
@@ -3802,8 +3891,8 @@ if (isset($_GET['print'])) {
                                                 <td class="col-center"><?php echo htmlspecialchars($slotTimeLabel); ?></td>
                                                 <td class="subject-code-cell"><?php echo htmlspecialchars($r['subject_code'] ?? ''); ?></td>
                                                 <td class="description-cell"><?php echo htmlspecialchars($r ? $format_subject_description($r) : ''); ?></td>
-                                                <td class="col-center"><?php echo $r ? number_format($get_row_units($r) * $slotPairMultiplier, 2) : ''; ?></td>
-                                                <td class="col-center"><?php echo $r ? number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0) * $slotPairMultiplier, 2) : ''; ?></td>
+                                                <td class="col-center"><?php echo $r ? number_format($get_row_units($r) * (float)($r['report_unit_multiplier'] ?? $slotPairMultiplier), 2) : ''; ?></td>
+                                                <td class="col-center"><?php echo $r ? number_format((float)($r['scheduled_hours'] ?? $r['hours_per_week'] ?? 0) * (float)($r['report_pair_multiplier'] ?? $slotPairMultiplier), 2) : ''; ?></td>
                                                 <td class="instructor-cell"><?php echo htmlspecialchars($r['instructor_name'] ?? ''); ?></td>
                                                 <td class="col-center"><?php echo htmlspecialchars((string)($r['report_room_label'] ?? $r['room_number'] ?? '')); ?></td>
                                             </tr>

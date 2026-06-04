@@ -1,3 +1,25 @@
+# Instructor Load Units Integration
+**Status**: Completed
+
+**What Was Added:**
+- [x] Added `instructor_lecture_units` and `instructor_lab_units` to subjects
+- [x] Added clear `Class ... Units` and `Instructor ... Load Units` labels in `admin/manage_subjects.php`
+- [x] Added `Total Instructor Load Units` summaries to add/edit subject forms
+- [x] Defaulted instructor load units to class units, while still allowing manual override
+- [x] Switched faculty workload calculations in `admin/report.php` to use instructor load units
+- [x] Updated workload report labels to say `Instructor Load Units`
+
+**Files Touched:**
+- `admin/manage_subjects.php`
+- `admin/report.php`
+- `TODO.md`
+
+**Notes:**
+- Class units remain separate from instructor load units.
+- Faculty workload totals now use instructor load units when available, with fallback to class units for older subjects.
+
+---
+
 # Manage Subjects UI Enhancement
 **Status**: In Progress
 

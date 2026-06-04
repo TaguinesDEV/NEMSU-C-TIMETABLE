@@ -9,6 +9,8 @@ $error = '';
 // Ensure schema supports subject type and decimal hours.
 try {
     $subjectColumns = [];
+    $createdInstructorLectureUnits = false;
+    $createdInstructorLabUnits = false;
     foreach ($pdo->query("SHOW COLUMNS FROM subjects")->fetchAll(PDO::FETCH_ASSOC) as $col) {
         $subjectColumns[$col['Field']] = $col;
     }
@@ -22,6 +24,14 @@ try {
     }
     if (!isset($subjectColumns['lab_credits'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN lab_credits DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER lecture_credits");
+    }
+    if (!isset($subjectColumns['instructor_lecture_units'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN instructor_lecture_units DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER lab_credits");
+        $createdInstructorLectureUnits = true;
+    }
+    if (!isset($subjectColumns['instructor_lab_units'])) {
+        $pdo->exec("ALTER TABLE subjects ADD COLUMN instructor_lab_units DECIMAL(4,2) NOT NULL DEFAULT 0.00 AFTER instructor_lecture_units");
+        $createdInstructorLabUnits = true;
     }
 
     $creditsType = strtolower((string)($subjectColumns['credits']['Type'] ?? ''));
@@ -68,6 +78,19 @@ try {
     }
     if (!isset($subjectColumns['preferred_end_time'])) {
         $pdo->exec("ALTER TABLE subjects ADD COLUMN preferred_end_time TIME NULL AFTER preferred_start_time");
+    }
+
+    if ($createdInstructorLectureUnits || $createdInstructorLabUnits) {
+        $backfillAssignments = [];
+        if ($createdInstructorLectureUnits) {
+            $backfillAssignments[] = "instructor_lecture_units = lecture_credits";
+        }
+        if ($createdInstructorLabUnits) {
+            $backfillAssignments[] = "instructor_lab_units = lab_credits";
+        }
+        if (!empty($backfillAssignments)) {
+            $pdo->exec("UPDATE subjects SET " . implode(', ', $backfillAssignments));
+        }
     }
 } catch (Exception $e) {
     // Continue page load even if auto-migration is not allowed in this environment.
@@ -515,6 +538,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $subject_name = $_POST['subject_name'];
         $lecture_credits = (float)($_POST['lecture_credits'] ?? 0);
         $lab_credits = (float)($_POST['lab_credits'] ?? 0);
+        $instructor_lecture_units = normalizeCredits($_POST['instructor_lecture_units'] ?? $lecture_credits);
+        $instructor_lab_units = normalizeCredits($_POST['instructor_lab_units'] ?? $lab_credits);
         $credits = normalizeCredits($lecture_credits + $lab_credits);
         [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
@@ -544,13 +569,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Credits/units must be greater than 0.";
         } else {
             try {
-                $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, lecture_credits, lab_credits, department, program_id, subject_type, semester, year_level, preferred_day_pair, prerequisites, preferred_start_time, preferred_end_time, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt = $pdo->prepare("INSERT INTO subjects (subject_code, subject_name, credits, lecture_credits, lab_credits, instructor_lecture_units, instructor_lab_units, department, program_id, subject_type, semester, year_level, preferred_day_pair, prerequisites, preferred_start_time, preferred_end_time, hours_per_week, lecture_hours, lab_hours, meetings_per_week, lecture_minutes_per_meeting, lab_minutes_per_meeting) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 $stmt->execute([
                     $subject_code,
                     $subject_name,
                     $credits,
                     $lecture_credits,
                     $lab_credits,
+                    $instructor_lecture_units,
+                    $instructor_lab_units,
                     $department,
                     $program_id,
                     $subject_type,
@@ -580,6 +607,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $subject_name = $_POST['subject_name'];
         $lecture_credits = (float)($_POST['lecture_credits'] ?? 0);
         $lab_credits = (float)($_POST['lab_credits'] ?? 0);
+        $instructor_lecture_units = normalizeCredits($_POST['instructor_lecture_units'] ?? $lecture_credits);
+        $instructor_lab_units = normalizeCredits($_POST['instructor_lab_units'] ?? $lab_credits);
         $credits = normalizeCredits($lecture_credits + $lab_credits);
         [$program_id, $department] = normalizeProgramScope($_POST['program_id'] ?? 'all', $programNameById);
         $subject_type = strtolower(trim((string)($_POST['subject_type'] ?? 'major')));
@@ -609,13 +638,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = "Credits/units must be greater than 0.";
         } else {
             try {
-                $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, lecture_credits = ?, lab_credits = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, preferred_day_pair = ?, prerequisites = ?, preferred_start_time = ?, preferred_end_time = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
+                $stmt = $pdo->prepare("UPDATE subjects SET subject_code = ?, subject_name = ?, credits = ?, lecture_credits = ?, lab_credits = ?, instructor_lecture_units = ?, instructor_lab_units = ?, department = ?, program_id = ?, subject_type = ?, semester = ?, year_level = ?, preferred_day_pair = ?, prerequisites = ?, preferred_start_time = ?, preferred_end_time = ?, hours_per_week = ?, lecture_hours = ?, lab_hours = ?, meetings_per_week = ?, lecture_minutes_per_meeting = ?, lab_minutes_per_meeting = ? WHERE id = ?");
                 $stmt->execute([
                     $subject_code,
                     $subject_name,
                     $credits,
                     $lecture_credits,
                     $lab_credits,
+                    $instructor_lecture_units,
+                    $instructor_lab_units,
                     $department,
                     $program_id,
                     $subject_type,
@@ -1467,7 +1498,7 @@ if ($selectedSemester !== '') {
                             <input type="text" id="lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" value="2:00" placeholder="e.g. 1:30 or 90">
                         </div>
                         <div class="form-group">
-                            <label for="lecture_credits">Lecture Units:</label>
+                            <label for="lecture_credits">Class Lecture Units:</label>
                             <input type="number" id="lecture_credits" name="lecture_credits" min="0" max="6" step="0.5" value="3" required>
                         </div>
                     </div>
@@ -1477,15 +1508,32 @@ if ($selectedSemester !== '') {
                             <input type="text" id="lab_minutes_per_meeting" name="lab_minutes_per_meeting" value="0:00" placeholder="e.g. 1:30 or 90">
                         </div>
                         <div class="form-group">
-                            <label for="lab_credits">Laboratory Units:</label>
+                            <label for="lab_credits">Class Laboratory Units:</label>
                             <input type="number" id="lab_credits" name="lab_credits" min="0" max="6" step="0.5" value="0" required>
                         </div>
+                    </div>
+                    <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div class="form-group">
+                            <label for="instructor_lecture_units">Instructor Lecture Load Units:</label>
+                            <input type="number" id="instructor_lecture_units" name="instructor_lecture_units" min="0" max="6" step="0.5" value="3" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="instructor_lab_units">Instructor Laboratory Load Units:</label>
+                            <input type="number" id="instructor_lab_units" name="instructor_lab_units" min="0" max="6" step="0.5" value="0" required>
+                        </div>
+                    </div>
+                    <div class="form-group form-full" style="margin-top: -4px;">
+                        <small style="color: #4b5563;">Instructor load units are used in faculty workload reports only.</small>
                     </div>
                 </div>
 
                 <div class="form-group">
-                    <label for="hours_per_week">Total Hours and Units:</label>
-                    <input type="text" id="hours_per_week" name="hours_per_week" value="2:00 (3.00 units)" readonly>
+                    <label for="hours_per_week">Total Class Hours and Units:</label>
+                    <input type="text" id="hours_per_week" name="hours_per_week" value="2:00 (3.00 class units)" readonly>
+                </div>
+                <div class="form-group">
+                    <label for="instructor_total_units">Total Instructor Load Units:</label>
+                    <input type="text" id="instructor_total_units" value="3.00 instructor load units" readonly>
                 </div>
                 
                 <button type="submit" name="add_subject" class="btn-primary">Add Subject</button>
@@ -1582,7 +1630,7 @@ if ($selectedSemester !== '') {
                                         <input type="text" id="edit_lecture_minutes_per_meeting" name="lecture_minutes_per_meeting" value="2:00">
                                     </div>
                                     <div class="form-group">
-                                        <label for="edit_lecture_credits">Lecture Units:</label>
+                                        <label for="edit_lecture_credits">Class Lecture Units:</label>
                                         <input type="number" id="edit_lecture_credits" name="lecture_credits" min="0" max="6" step="0.5" required>
                                     </div>
                                 </div>
@@ -1592,14 +1640,31 @@ if ($selectedSemester !== '') {
                                         <input type="text" id="edit_lab_minutes_per_meeting" name="lab_minutes_per_meeting" value="0:00">
                                     </div>
                                     <div class="form-group">
-                                        <label for="edit_lab_credits">Laboratory Units:</label>
+                                        <label for="edit_lab_credits">Class Laboratory Units:</label>
                                         <input type="number" id="edit_lab_credits" name="lab_credits" min="0" max="6" step="0.5" required>
                                     </div>
                                 </div>
+                                <div class="form-row" style="margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                    <div class="form-group">
+                                        <label for="edit_instructor_lecture_units">Instructor Lecture Load Units:</label>
+                                        <input type="number" id="edit_instructor_lecture_units" name="instructor_lecture_units" min="0" max="6" step="0.5" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="edit_instructor_lab_units">Instructor Laboratory Load Units:</label>
+                                        <input type="number" id="edit_instructor_lab_units" name="instructor_lab_units" min="0" max="6" step="0.5" required>
+                                    </div>
+                                </div>
+                                <div class="form-group form-full" style="margin-top: -4px;">
+                                    <small style="color: #4b5563;">Instructor load units are used in faculty workload reports only.</small>
+                                </div>
                             </div>
                             <div class="form-group form-full computed-total" style="margin-top: 15px;">
-                                <label for="edit_hours_per_week">Total Hours and Units:</label>
+                                <label for="edit_hours_per_week">Total Class Hours and Units:</label>
                                 <input type="text" id="edit_hours_per_week" name="hours_per_week" readonly>
+                            </div>
+                            <div class="form-group form-full computed-total" style="margin-top: 15px;">
+                                <label for="edit_instructor_total_units">Total Instructor Load Units:</label>
+                                <input type="text" id="edit_instructor_total_units" readonly>
                             </div>
                         </div>
 
@@ -1766,6 +1831,7 @@ if ($selectedSemester !== '') {
             const prefix = typeEl.id && typeEl.id.startsWith('edit_') ? 'edit_' : '';
             const labEl = document.getElementById(`${prefix}lab_minutes_per_meeting`);
             const labCreditsEl = document.getElementById(`${prefix}lab_credits`);
+            const instructorLabUnitsEl = document.getElementById(`${prefix}instructor_lab_units`);
             if (labEl) {
                 labEl.disabled = typeEl.value === 'minor';
                 if (typeEl.value === 'minor') {
@@ -1778,6 +1844,14 @@ if ($selectedSemester !== '') {
                     labCreditsEl.value = '0';
                 }
             }
+            if (instructorLabUnitsEl) {
+                instructorLabUnitsEl.disabled = typeEl.value === 'minor';
+                if (typeEl.value === 'minor') {
+                    instructorLabUnitsEl.value = '0';
+                    instructorLabUnitsEl.dataset.userEdited = 'false';
+                }
+            }
+            syncMajorTotal(prefix);
         }
 
         function formatClockMinutes(totalMinutes) {
@@ -1807,12 +1881,48 @@ if ($selectedSemester !== '') {
             return Math.max(0, Math.round(numeric));
         }
 
+        function syncInstructorLoadUnits(prefix = '') {
+            [
+                ['lecture_credits', 'instructor_lecture_units'],
+                ['lab_credits', 'instructor_lab_units'],
+            ].forEach(([classFieldId, instructorFieldId]) => {
+                const classField = document.getElementById(`${prefix}${classFieldId}`);
+                const instructorField = document.getElementById(`${prefix}${instructorFieldId}`);
+                if (!classField || !instructorField) {
+                    return;
+                }
+                if (instructorField.dataset.userEdited === 'true') {
+                    return;
+                }
+                instructorField.value = classField.value || '0';
+            });
+        }
+
+        function syncInstructorLoadOverrideState(prefix = '') {
+            [
+                ['lecture_credits', 'instructor_lecture_units'],
+                ['lab_credits', 'instructor_lab_units'],
+            ].forEach(([classFieldId, instructorFieldId]) => {
+                const classField = document.getElementById(`${prefix}${classFieldId}`);
+                const instructorField = document.getElementById(`${prefix}${instructorFieldId}`);
+                if (!classField || !instructorField) {
+                    return;
+                }
+                const classValue = parseFloat(classField.value || 0);
+                const instructorValue = parseFloat(instructorField.value || 0);
+                instructorField.dataset.userEdited = Math.abs(classValue - instructorValue) > 0.001 ? 'true' : 'false';
+            });
+        }
+
         function syncMajorTotal(prefix = '') {
             const lectureEl = document.getElementById(`${prefix}lecture_minutes_per_meeting`);
             const labEl = document.getElementById(`${prefix}lab_minutes_per_meeting`);
             const hoursEl = document.getElementById(`${prefix}hours_per_week`);
+            const instructorTotalEl = document.getElementById(`${prefix}instructor_total_units`);
             const lecCredits = parseFloat(document.getElementById(`${prefix}lecture_credits`)?.value || 0);
             const labCredits = parseFloat(document.getElementById(`${prefix}lab_credits`)?.value || 0);
+            const instructorLectureUnits = parseFloat(document.getElementById(`${prefix}instructor_lecture_units`)?.value || 0);
+            const instructorLabUnits = parseFloat(document.getElementById(`${prefix}instructor_lab_units`)?.value || 0);
 
             if (!lectureEl || !labEl || !hoursEl) return;
 
@@ -1820,8 +1930,12 @@ if ($selectedSemester !== '') {
             const lab = parseDurationToMinutes(labEl.value);
             const totalMinutes = lec + lab;
             const totalUnits = lecCredits + labCredits;
+            const totalInstructorUnits = instructorLectureUnits + instructorLabUnits;
 
-            hoursEl.value = `${formatClockMinutes(totalMinutes)} (${totalUnits.toFixed(2)} units)`;
+            hoursEl.value = `${formatClockMinutes(totalMinutes)} (${totalUnits.toFixed(2)} class units)`;
+            if (instructorTotalEl) {
+                instructorTotalEl.value = `${totalInstructorUnits.toFixed(2)} instructor load units`;
+            }
         }
 
         function syncHoursDefault(typeEl, hoursEl, meetingsEl, lectureEl, labEl, creditsEl, programSelectEl) {
@@ -1901,6 +2015,8 @@ if ($selectedSemester !== '') {
                     document.getElementById('edit_program_id').value = data.program_id ? String(data.program_id) : 'all';
                     document.getElementById('edit_lecture_credits').value = data.lecture_credits || 0;
                     document.getElementById('edit_lab_credits').value = data.lab_credits || 0;
+                    document.getElementById('edit_instructor_lecture_units').value = data.instructor_lecture_units ?? data.lecture_credits ?? 0;
+                    document.getElementById('edit_instructor_lab_units').value = data.instructor_lab_units ?? data.lab_credits ?? 0;
                     document.getElementById('edit_semester').value = data.semester || '1st Semester';
                     document.getElementById('edit_year_level').value = String(data.year_level || 1);
                     document.getElementById('edit_prerequisites').value = data.prerequisites || '';
@@ -1916,6 +2032,7 @@ if ($selectedSemester !== '') {
                     editTypeEl.dataset.previousType = editTypeEl.value;
                     editLectureEl.value = formatClockMinutes(data.lecture_minutes_per_meeting || 0);
                     editLabEl.value = formatClockMinutes(data.lab_minutes_per_meeting || 0);
+                    syncInstructorLoadOverrideState('edit_');
                     syncMajorTotal('edit_');
                     updateMajorBreakdownVisibility(editTypeEl, editBreakdown, editHoursEl);
                     openModal('editSubjectModal');
@@ -1930,6 +2047,8 @@ if ($selectedSemester !== '') {
             const addBreakdown = document.getElementById('add_major_breakdown');
             const addLecCreditsEl = document.getElementById('lecture_credits');
             const addLabCreditsEl = document.getElementById('lab_credits');
+            const addInstructorLectureUnitsEl = document.getElementById('instructor_lecture_units');
+            const addInstructorLabUnitsEl = document.getElementById('instructor_lab_units');
             const addProgramEl = document.getElementById('program_id');
             addSubjectType.dataset.previousType = addSubjectType.value;
             addSubjectType.addEventListener('change', function () {
@@ -1940,7 +2059,15 @@ if ($selectedSemester !== '') {
             [addLecCreditsEl, addLabCreditsEl].forEach(el => {
                 if (el) {
                     el.addEventListener('input', function () {
-                        // Keep manually entered lecture/lab time when units are edited.
+                        syncInstructorLoadUnits('');
+                        syncMajorTotal('');
+                    });
+                }
+            });
+            [addInstructorLectureUnitsEl, addInstructorLabUnitsEl].forEach(el => {
+                if (el) {
+                    el.addEventListener('input', function () {
+                        el.dataset.userEdited = 'true';
                         syncMajorTotal('');
                     });
                 }
@@ -1959,6 +2086,14 @@ if ($selectedSemester !== '') {
             updateMajorBreakdownVisibility(addSubjectType, addBreakdown, addHoursEl);
             const initialTotal = parseFloat(addLecCreditsEl.value || 0) + parseFloat(addLabCreditsEl.value || 0);
             syncHoursDefault(addSubjectType, addHoursEl, null, addLectureEl, addLabEl, { value: initialTotal }, addProgramEl);
+            if (addInstructorLectureUnitsEl) {
+                addInstructorLectureUnitsEl.dataset.userEdited = 'false';
+            }
+            if (addInstructorLabUnitsEl) {
+                addInstructorLabUnitsEl.dataset.userEdited = 'false';
+            }
+            syncInstructorLoadUnits('');
+            syncMajorTotal('');
         }
 
         const editSubjectType = document.getElementById('edit_subject_type');
@@ -1969,6 +2104,8 @@ if ($selectedSemester !== '') {
             const editBreakdown = document.getElementById('edit_major_breakdown');
             const editLecCreditsEl = document.getElementById('edit_lecture_credits');
             const editLabCreditsEl = document.getElementById('edit_lab_credits');
+            const editInstructorLectureUnitsEl = document.getElementById('edit_instructor_lecture_units');
+            const editInstructorLabUnitsEl = document.getElementById('edit_instructor_lab_units');
             const editProgramEl = document.getElementById('edit_program_id');
             editSubjectType.addEventListener('change', function () {
                 const totalUnits = parseFloat(editLecCreditsEl.value || 0) + parseFloat(editLabCreditsEl.value || 0);
@@ -1978,7 +2115,15 @@ if ($selectedSemester !== '') {
             [editLecCreditsEl, editLabCreditsEl].forEach(el => {
                 if (el) {
                     el.addEventListener('input', function () {
-                        // Keep manually entered lecture/lab time when units are edited.
+                        syncInstructorLoadUnits('edit_');
+                        syncMajorTotal('edit_');
+                    });
+                }
+            });
+            [editInstructorLectureUnitsEl, editInstructorLabUnitsEl].forEach(el => {
+                if (el) {
+                    el.addEventListener('input', function () {
+                        el.dataset.userEdited = 'true';
                         syncMajorTotal('edit_');
                     });
                 }
